@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11,40 +12,48 @@
       padding: 20px;
       line-height: 1.4;
     }
+
     canvas {
       display: block;
       margin-bottom: 4px;
       border: 1px solid #444;
     }
+
     .legend {
       display: flex;
       font-size: 14px;
       margin-bottom: 12px;
     }
+
     .legend-item {
       margin-right: 16px;
       display: flex;
       align-items: center;
     }
+
     .swatch {
       width: 16px;
       height: 4px;
       margin-right: 4px;
     }
+
     p.caption {
       margin: 4px 0 12px 0;
       font-size: 14px;
     }
+
     p.result {
       margin: 12px 0;
       font-size: 16px;
       font-weight: bold;
     }
+
     p.note {
       margin-top: 16px;
       font-size: 14px;
       max-width: 800px;
     }
+
     h2 {
       margin-top: 40px;
       font-size: 20px;
@@ -53,759 +62,1252 @@
     }
   </style>
 </head>
+
 <body>
-<script>
-  // ──────────────────────────────────────────────────────────
-  // 1) Core utilities: mean, subtract mean, pearsonCorr, matrix ops
-  // ──────────────────────────────────────────────────────────
-  function mean1D(arr) {
-    let s = 0;
-    for (let v of arr) s += v;
-    return s / arr.length;
-  }
-  function subtractMean1D(arr) {
-    const μ = mean1D(arr);
-    return arr.map(v => v - μ);
-  }
-  function pearsonCorr(x, y) {
-    const N = x.length;
-    const μx = mean1D(x), μy = mean1D(y);
-    let num = 0, sx = 0, sy = 0;
-    for (let i = 0; i < N; i++) {
-      const dx = x[i] - μx, dy = y[i] - μy;
-      num += dx * dy;
-      sx  += dx * dx;
-      sy  += dy * dy;
+  <script>
+    // ──────────────────────────────────────────────────────────
+    // Worker source code as a string
+    // ──────────────────────────────────────────────────────────
+    const workerCode = `
+    // ──────────────────────────────────────────────────────────
+    // 1) Core utilities using Float32Array
+    // ──────────────────────────────────────────────────────────
+    function mean1D(arr) {
+      let sum = 0;
+      for (let i = 0; i < arr.length; i++) sum += arr[i];
+      return sum / arr.length;
     }
-    return num / (Math.sqrt(sx * sy) || 1e-12);
-  }
-  function matrixMultiply(A, B) {
-    const m = A.length, k = A[0].length, n = B[0].length;
-    const R = Array.from({length: m}, () => new Array(n).fill(0));
-    for (let i = 0; i < m; i++) {
-      for (let j = 0; j < n; j++) {
-        let acc = 0;
-        for (let t = 0; t < k; t++) acc += A[i][t] * B[t][j];
-        R[i][j] = acc;
+    function subtractMean1D(arr) {
+      const μ = mean1D(arr);
+      const out = new Float32Array(arr.length);
+      for (let i = 0; i < arr.length; i++) out[i] = arr[i] - μ;
+      return out;
+    }
+    function pearsonCorr(x, y) {
+      const N = x.length;
+      const μx = mean1D(x), μy = mean1D(y);
+      let num = 0, sx = 0, sy = 0;
+      for (let i = 0; i < N; i++) {
+        const dx = x[i] - μx, dy = y[i] - μy;
+        num += dx * dy;
+        sx  += dx * dx;
+        sy  += dy * dy;
       }
+      return num / (Math.sqrt(sx * sy) || 1e-12);
     }
-    return R;
-  }
-  function matrixTranspose(M) {
-    const rows = M.length, cols = M[0].length;
-    const T = Array.from({length: cols}, () => new Array(rows));
-    for (let i = 0; i < rows; i++) {
-      for (let j = 0; j < cols; j++) {
-        T[j][i] = M[i][j];
-      }
-    }
-    return T;
-  }
-  function covMatrix(X) {
-    // X: n×N centered rows → returns n×n covariance
-    const n = X.length, N = X[0].length;
-    const C = Array.from({length: n}, () => new Array(n).fill(0));
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < n; j++) {
-        let s = 0;
-        for (let k = 0; k < N; k++) s += X[i][k] * X[j][k];
-        C[i][j] = s / N;
-      }
-    }
-    return C;
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // 2) PCA rank-1 reconstruction (n=1) for two-channel mixture
-  // ──────────────────────────────────────────────────────────
-  function pcaReconstruct1(signals) {
-    // signals = [mix1[], mix2[]], each length N
-    const N = signals[0].length;
-    // (a) Center each channel
-    const Xc0 = subtractMean1D(signals[0]);
-    const Xc1 = subtractMean1D(signals[1]);
-    const meanVec = [ mean1D(signals[0]), mean1D(signals[1]) ];
-    // (b) Covariance entries
-    let s00 = 0, s11 = 0, s01 = 0;
-    for (let k = 0; k < N; k++) {
-      s00 += Xc0[k]*Xc0[k];
-      s11 += Xc1[k]*Xc1[k];
-      s01 += Xc0[k]*Xc1[k];
-    }
-    const cov00 = s00 / N;
-    const cov11 = s11 / N;
-    const cov01 = s01 / N;
-    // (c) 2×2 principal eigenvector
-    const tr = cov00 + cov11;
-    const det = cov00*cov11 - cov01*cov01;
-    const discrim = Math.sqrt(Math.max(tr*tr - 4*det, 0));
-    const λ1 = 0.5*(tr + discrim);
-    let e1;
-    if (Math.abs(cov01) > 1e-12) {
-      e1 = [ cov01, λ1 - cov00 ];
-    } else {
-      e1 = (cov00 >= cov11 ? [1,0] : [0,1]);
-    }
-    const nrmE1 = Math.hypot(e1[0], e1[1]) || 1e-12;
-    e1 = [ e1[0]/nrmE1, e1[1]/nrmE1 ];
-    // (d) Project Xc onto e1 to get scores
-    const scores = new Array(N);
-    for (let k = 0; k < N; k++) {
-      scores[k] = e1[0]*Xc0[k] + e1[1]*Xc1[k];
-    }
-    // (e) Reconstruct Xc_r = (scores[k] * e1) + mean
-    const rec0 = new Array(N), rec1 = new Array(N);
-    for (let k = 0; k < N; k++) {
-      rec0[k] = scores[k]*e1[0] + meanVec[0];
-      rec1[k] = scores[k]*e1[1] + meanVec[1];
-    }
-    return { recSignal1: rec0, recSignal2: rec1 };
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // 3) Eigen-decomposition (power iteration + deflation)
-  // ──────────────────────────────────────────────────────────
-  function eigDecompose(C) {
-    const n = C.length;
-    const A = C.map(row => row.slice());
-    const vals = [], vecs = [];
-    for (let m = 0; m < n; m++) {
-      let b = Array.from({length: n}, () => Math.random());
-      // Deflate against previous eigenvectors
-      for (let p = 0; p < m; p++) {
-        const v0 = vecs[p];
-        let dot = 0;
-        for (let i = 0; i < n; i++) dot += b[i] * v0[i];
-        for (let i = 0; i < n; i++) b[i] -= dot * v0[i];
-      }
-      let λold = 0;
-      for (let it = 0; it < 1000; it++) {
-        // Multiply A·b
-        const bnew = new Array(n).fill(0);
-        for (let i = 0; i < n; i++) {
+    function matrixMultiply(A_flat, m, k, B_flat, n) {
+      const R = new Float32Array(m * n);
+      for (let i = 0; i < m; i++) {
+        const baseA = i * k;
+        const baseR = i * n;
+        for (let j = 0; j < n; j++) {
           let acc = 0;
-          for (let j = 0; j < n; j++) acc += A[i][j] * b[j];
-          bnew[i] = acc;
+          for (let t = 0; t < k; t++) {
+            acc += A_flat[baseA + t] * B_flat[t * n + j];
+          }
+          R[baseR + j] = acc;
         }
-        // Re-orthogonalize
+      }
+      return R;
+    }
+    function matrixTranspose(M_flat, rows, cols) {
+      const T = new Float32Array(rows * cols);
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          T[c * rows + r] = M_flat[r * cols + c];
+        }
+      }
+      return T;
+    }
+    function covMatrix(Xc_flat, n, N) {
+      const C = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          let sum = 0;
+          const base_i = i * N, base_j = j * N;
+          for (let k = 0; k < N; k++) {
+            sum += Xc_flat[base_i + k] * Xc_flat[base_j + k];
+          }
+          C[i * n + j] = sum / N;
+        }
+      }
+      return C;
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 2) PCA rank-1 reconstruction for two channels
+    // ──────────────────────────────────────────────────────────
+    function pcaReconstruct1(signals) {
+      const [sig0, sig1] = signals;
+      const N = sig0.length;
+      const Xc0 = subtractMean1D(sig0);
+      const Xc1 = subtractMean1D(sig1);
+      const μ0 = mean1D(sig0), μ1 = mean1D(sig1);
+      let s00 = 0, s11 = 0, s01 = 0;
+      for (let k = 0; k < N; k++) {
+        s00 += Xc0[k] * Xc0[k];
+        s11 += Xc1[k] * Xc1[k];
+        s01 += Xc0[k] * Xc1[k];
+      }
+      const cov00 = s00 / N, cov11 = s11 / N, cov01 = s01 / N;
+      const tr = cov00 + cov11;
+      const det = cov00 * cov11 - cov01 * cov01;
+      const discrim = Math.sqrt(Math.max(tr * tr - 4 * det, 0));
+      const λ1 = 0.5 * (tr + discrim);
+      let e1x, e1y;
+      if (Math.abs(cov01) > 1e-12) {
+        e1x = cov01; e1y = λ1 - cov00;
+      } else {
+        if (cov00 >= cov11) { e1x = 1; e1y = 0; }
+        else               { e1x = 0; e1y = 1; }
+      }
+      const nrm = Math.hypot(e1x, e1y) || 1e-12;
+      e1x /= nrm; e1y /= nrm;
+      const scores = new Float32Array(N);
+      for (let k = 0; k < N; k++) {
+        scores[k] = e1x * Xc0[k] + e1y * Xc1[k];
+      }
+      const rec0 = new Float32Array(N), rec1 = new Float32Array(N);
+      for (let k = 0; k < N; k++) {
+        rec0[k] = scores[k] * e1x + μ0;
+        rec1[k] = scores[k] * e1y + μ1;
+      }
+      return { rec0, rec1 };
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 3) Eigen-decomposition (power iteration + deflation)
+    // ──────────────────────────────────────────────────────────
+    function eigDecompose(C_flat, n) {
+      const A_flat = new Float32Array(n * n);
+      A_flat.set(C_flat);
+      const vals = new Float32Array(n);
+      const vecs = new Float32Array(n * n);
+      for (let m = 0; m < n; m++) {
+        const b = new Float32Array(n);
+        for (let i = 0; i < n; i++) b[i] = Math.random();
         for (let p = 0; p < m; p++) {
-          const v0 = vecs[p];
           let dot = 0;
-          for (let i = 0; i < n; i++) dot += bnew[i] * v0[i];
-          for (let i = 0; i < n; i++) bnew[i] -= dot * v0[i];
+          for (let i = 0; i < n; i++) dot += b[i] * vecs[p * n + i];
+          for (let i = 0; i < n; i++) b[i] -= dot * vecs[p * n + i];
         }
-        // Normalize
-        const norm = Math.hypot(...bnew) || 1e-12;
-        for (let i = 0; i < n; i++) b[i] = bnew[i] / norm;
-        // Rayleigh quotient
-        let Ab_dot = 0, λnew = 0;
+        let λold = 0;
+        for (let it = 0; it < 1000; it++) {
+          const bnew = new Float32Array(n);
+          for (let i = 0; i < n; i++) {
+            let acc = 0;
+            const base = i * n;
+            for (let j = 0; j < n; j++) {
+              acc += A_flat[base + j] * b[j];
+            }
+            bnew[i] = acc;
+          }
+          for (let p = 0; p < m; p++) {
+            let dot = 0;
+            for (let i = 0; i < n; i++) dot += bnew[i] * vecs[p * n + i];
+            for (let i = 0; i < n; i++) bnew[i] -= dot * vecs[p * n + i];
+          }
+          let norm = 0;
+          for (let i = 0; i < n; i++) norm += bnew[i] * bnew[i];
+          norm = Math.sqrt(norm) || 1e-12;
+          for (let i = 0; i < n; i++) b[i] = bnew[i] / norm;
+          let λnew = 0;
+          for (let i = 0; i < n; i++) {
+            let acc = 0;
+            const base = i * n;
+            for (let j = 0; j < n; j++) {
+              acc += A_flat[base + j] * b[j];
+            }
+            λnew += b[i] * acc;
+          }
+          if (Math.abs(λnew - λold) < 1e-8) break;
+          λold = λnew;
+        }
+        const Ab2 = new Float32Array(n);
         for (let i = 0; i < n; i++) {
           let acc = 0;
-          for (let j = 0; j < n; j++) acc += A[i][j] * b[j];
-          λnew += b[i] * acc;
+          const base = i * n;
+          for (let j = 0; j < n; j++) {
+            acc += A_flat[base + j] * b[j];
+          }
+          Ab2[i] = acc;
         }
-        if (Math.abs(λnew - λold) < 1e-8) break;
-        λold = λnew;
-      }
-      // Get exact eigenvalue
-      const Ab2 = new Array(n).fill(0);
-      let eVal = 0;
-      for (let i = 0; i < n; i++) {
-        let acc = 0;
-        for (let j = 0; j < n; j++) acc += A[i][j] * b[j];
-        Ab2[i] = acc;
-      }
-      for (let i = 0; i < n; i++) eVal += b[i] * Ab2[i];
-      vals.push(eVal);
-      vecs.push(b.slice());
-      // Deflate
-      for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-          A[i][j] -= eVal * b[i] * b[j];
-        }
-      }
-    }
-    return { vals, vecs };
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // 4) Whitening for n×N
-  // ──────────────────────────────────────────────────────────
-  function whiten(Xc) {
-    const n = Xc.length;
-    const C = covMatrix(Xc);
-    const { vals, vecs } = eigDecompose(C);
-    const E = Array.from({length: n}, () => new Array(n).fill(0));
-    for (let col = 0; col < n; col++) {
-      for (let row = 0; row < n; row++) {
-        E[row][col] = vecs[col][row];
-      }
-    }
-    const DinvSqrt = vals.map(v => 1 / Math.sqrt(v || 1e-12));
-    const ET = matrixTranspose(E);
-    const ETXc = matrixMultiply(ET, Xc); // n×N
-    const Xw = Array.from({length: n}, () => new Array(Xc[0].length).fill(0));
-    for (let i = 0; i < n; i++) {
-      for (let k = 0; k < Xc[0].length; k++) {
-        Xw[i][k] = ETXc[i][k] * DinvSqrt[i];
-      }
-    }
-    return { Xw, E, D: vals };
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // 5) General symmetric FastICA (n×n)
-  // ──────────────────────────────────────────────────────────
-  function fastICA_n(X, tol = 1e-6, maxIter = 200) {
-    const n = X.length, N = X[0].length;
-    // (a) Center each row
-    const Xc = X.map(row => subtractMean1D(row));
-    // (b) Whiten
-    const { Xw, E, D } = whiten(Xc);
-    // (c) Initialize random W (n×n) with orthonormal rows
-    let W = Array.from({length: n}, () => {
-      const r = Array.from({length: n}, () => Math.random());
-      const norm = Math.hypot(...r) || 1e-12;
-      return r.map(v => v / norm);
-    });
-    function orthogonalize(M) {
-      const m = M.length;
-      // Compute M·M^T
-      const MMT = Array.from({length: m}, () => new Array(m).fill(0));
-      for (let i = 0; i < m; i++) {
-        for (let j = 0; j < m; j++) {
-          let s = 0;
-          for (let k = 0; k < m; k++) s += M[i][k] * M[j][k];
-          MMT[i][j] = s;
-        }
-      }
-      const { vals: vMMT, vecs: uMMT } = eigDecompose(MMT);
-      const U = Array.from({length: m}, () => new Array(m).fill(0));
-      for (let col = 0; col < m; col++) {
-        for (let row = 0; row < m; row++) {
-          U[row][col] = uMMT[col][row];
-        }
-      }
-      const invSqrt = vMMT.map(v => 1 / Math.sqrt(v || 1e-12));
-      // Compute Mcorr = (MMT)^{-1/2} = U·diag(invSqrt)·U^T
-      const UD = Array.from({length: m}, () => new Array(m).fill(0));
-      for (let i = 0; i < m; i++) {
-        for (let j = 0; j < m; j++) {
-          UD[i][j] = U[i][j] * invSqrt[j];
-        }
-      }
-      const Mcorr = Array.from({length: m}, () => new Array(m).fill(0));
-      for (let i = 0; i < m; i++) {
-        for (let j = 0; j < m; j++) {
-          let s = 0;
-          for (let k = 0; k < m; k++) s += UD[i][k] * U[j][k];
-          Mcorr[i][j] = s;
-        }
-      }
-      return matrixMultiply(Mcorr, M);
-    }
-    W = orthogonalize(W);
-    // (d) Iterations
-    for (let iter = 0; iter < maxIter; iter++) {
-      const Wold = W.map(row => row.slice());
-      // 1) Y = W·Xw  (n×N)
-      const Y = matrixMultiply(W, Xw);
-      // 2) g(u)=tanh(u), g'(u)=1−tanh²(u)
-      const G = Array.from({length: n}, () => new Array(N).fill(0));
-      const Gp = Array.from({length: n}, () => new Array(N).fill(0));
-      for (let i = 0; i < n; i++) {
-        for (let k = 0; k < N; k++) {
-          const t = Math.tanh(Y[i][k]);
-          G[i][k] = t;
-          Gp[i][k] = 1 - t*t;
-        }
-      }
-      // 3) Update each row w_i
-      const Wnew = Array.from({length: n}, () => new Array(n).fill(0));
-      for (let i = 0; i < n; i++) {
-        let α = 0;
-        for (let k = 0; k < N; k++) α += Gp[i][k];
-        α /= N;
-        const β = new Array(n).fill(0);
-        for (let j = 0; j < n; j++) {
-          let s = 0;
-          for (let k = 0; k < N; k++) s += Xw[j][k] * G[i][k];
-          β[j] = s / N;
-        }
-        for (let j = 0; j < n; j++) {
-          Wnew[i][j] = β[j] - α * W[i][j];
-        }
-      }
-      // 4) Orthogonalize
-      W = orthogonalize(Wnew);
-      // 5) Convergence
-      let maxDiff = 0;
-      for (let i = 0; i < n; i++) {
-        let dot = 0;
-        for (let j = 0; j < n; j++) dot += Wold[i][j] * W[i][j];
-        maxDiff = Math.max(maxDiff, Math.abs(Math.abs(dot) - 1));
-      }
-      if (maxDiff < tol) break;
-    }
-    // (e) ICs = W·Xw
-    const S = matrixMultiply(W, Xw); // n×N
-    // (f) Recover mixing matrix A = E·D^{1/2}·W^{-1}
-    function invertNxN(M) {
-      const n = M.length;
-      const A = M.map(row => row.slice());
-      const I = Array.from({length: n}, (_, i) =>
-        Array.from({length: n}, (_, j) => (i === j ? 1 : 0))
-      );
-      const aug = A.map((row, i) => row.concat(I[i]));
-      for (let i = 0; i < n; i++) {
-        let maxRow = i;
-        for (let r = i + 1; r < n; r++) {
-          if (Math.abs(aug[r][i]) > Math.abs(aug[maxRow][i])) {
-            maxRow = r;
+        let eVal = 0;
+        for (let i = 0; i < n; i++) eVal += b[i] * Ab2[i];
+        vals[m] = eVal;
+        for (let i = 0; i < n; i++) vecs[m * n + i] = b[i];
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            A_flat[i * n + j] -= eVal * b[i] * b[j];
           }
         }
-        if (Math.abs(aug[maxRow][i]) < 1e-12) throw new Error("Singular");
-        [aug[i], aug[maxRow]] = [aug[maxRow], aug[i]];
-        const div = aug[i][i];
-        for (let c = 0; c < 2*n; c++) aug[i][c] /= div;
-        for (let r = 0; r < n; r++) {
-          if (r !== i) {
-            const factor = aug[r][i];
-            for (let c = 0; c < 2*n; c++) {
-              aug[r][c] -= factor * aug[i][c];
+      }
+      return { vals, vecs };
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 4) Whitening for n×N
+    // ──────────────────────────────────────────────────────────
+    function whiten(Xc_flat, n, N) {
+      const C_flat = covMatrix(Xc_flat, n, N);
+      const { vals: D, vecs } = eigDecompose(C_flat, n);
+      const E_flat = new Float32Array(n * n);
+      for (let col = 0; col < n; col++) {
+        for (let row = 0; row < n; row++) {
+          E_flat[row * n + col] = vecs[col * n + row];
+        }
+      }
+      const DinvSqrt = new Float32Array(n);
+      for (let i = 0; i < n; i++) DinvSqrt[i] = 1 / Math.sqrt(D[i] || 1e-12);
+      const ET_flat = matrixTranspose(E_flat, n, n);
+      const ETXc_flat = matrixMultiply(ET_flat, n, n, Xc_flat, N);
+      const Xw_flat = new Float32Array(n * N);
+      for (let i = 0; i < n; i++) {
+        const base_i = i * N;
+        for (let k = 0; k < N; k++) {
+          Xw_flat[base_i + k] = ETXc_flat[base_i + k] * DinvSqrt[i];
+        }
+      }
+      return { Xw: Xw_flat, E: E_flat, D };
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 5) fastICA_n (symmetric)
+    // ──────────────────────────────────────────────────────────
+    function fastICA_n(X_flat, n, N, tol = 1e-6, maxIter = 200) {
+      const Xc_flat = new Float32Array(n * N);
+      for (let i = 0; i < n; i++) {
+        const base = i * N;
+        let sum = 0;
+        for (let k = 0; k < N; k++) sum += X_flat[base + k];
+        const μ = sum / N;
+        for (let k = 0; k < N; k++) {
+          Xc_flat[base + k] = X_flat[base + k] - μ;
+        }
+      }
+      const { Xw: Xw_flat, E: E_flat, D } = whiten(Xc_flat, n, N);
+      let W_flat = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        let norm = 0;
+        for (let j = 0; j < n; j++) {
+          const v = Math.random();
+          W_flat[i * n + j] = v;
+          norm += v * v;
+        }
+        norm = Math.sqrt(norm) || 1e-12;
+        for (let j = 0; j < n; j++) W_flat[i * n + j] /= norm;
+      }
+      function orthogonalize_rows(M_flat) {
+        const MMT_flat = new Float32Array(n * n);
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            let sum = 0;
+            for (let k = 0; k < n; k++) {
+              sum += M_flat[i * n + k] * M_flat[j * n + k];
+            }
+            MMT_flat[i * n + j] = sum;
+          }
+        }
+        const { vals: vMMT, vecs: uMMT_flat } = eigDecompose(MMT_flat, n);
+        const U_flat = new Float32Array(n * n);
+        for (let col = 0; col < n; col++) {
+          for (let row = 0; row < n; row++) {
+            U_flat[row * n + col] = uMMT_flat[col * n + row];
+          }
+        }
+        const invSqrt = new Float32Array(n);
+        for (let i = 0; i < n; i++) invSqrt[i] = 1 / Math.sqrt(vMMT[i] || 1e-12);
+        const UD_flat = new Float32Array(n * n);
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            UD_flat[i * n + j] = U_flat[i * n + j] * invSqrt[j];
+          }
+        }
+        const Mcorr_flat = matrixMultiply(UD_flat, n, n, matrixTranspose(U_flat, n, n), n);
+        return matrixMultiply(Mcorr_flat, n, n, M_flat, n);
+      }
+      W_flat = orthogonalize_rows(W_flat);
+      const Y_flat = new Float32Array(n * N);
+      const G_flat = new Float32Array(n * N);
+      const Gp_flat = new Float32Array(n * N);
+      const Wnew_flat = new Float32Array(n * n);
+      for (let iter = 0; iter < maxIter; iter++) {
+        const Wold_flat = W_flat.slice();
+        for (let i = 0; i < n; i++) {
+          const baseW_i = i * n;
+          const baseY_i = i * N;
+          for (let k = 0; k < N; k++) {
+            let acc = 0;
+            for (let j = 0; j < n; j++) {
+              acc += W_flat[baseW_i + j] * Xw_flat[j * N + k];
+            }
+            Y_flat[baseY_i + k] = acc;
+          }
+        }
+        for (let i = 0; i < n; i++) {
+          const base = i * N;
+          for (let k = 0; k < N; k++) {
+            const t = Math.tanh(Y_flat[base + k]);
+            G_flat[base + k] = t;
+            Gp_flat[base + k] = 1 - t * t;
+          }
+        }
+        for (let i = 0; i < n; i++) {
+          let α = 0;
+          const baseGp = i * N;
+          for (let k = 0; k < N; k++) α += Gp_flat[baseGp + k];
+          α /= N;
+          const β = new Float32Array(n);
+          for (let j = 0; j < n; j++) {
+            let sum = 0;
+            const baseXwj = j * N;
+            const baseG_i = i * N;
+            for (let k = 0; k < N; k++) {
+              sum += Xw_flat[baseXwj + k] * G_flat[baseG_i + k];
+            }
+            β[j] = sum / N;
+          }
+          const baseW_i = i * n;
+          const baseWnew_i = i * n;
+          for (let j = 0; j < n; j++) {
+            Wnew_flat[baseWnew_i + j] = β[j] - α * W_flat[baseW_i + j];
+          }
+        }
+        W_flat = orthogonalize_rows(Wnew_flat);
+        let maxDiff = 0;
+        for (let i = 0; i < n; i++) {
+          let dot = 0;
+          const base_old = i * n, base_new = i * n;
+          for (let j = 0; j < n; j++) {
+            dot += Wold_flat[base_old + j] * W_flat[base_new + j];
+          }
+          maxDiff = Math.max(maxDiff, Math.abs(Math.abs(dot) - 1));
+        }
+        if (maxDiff < tol) break;
+      }
+      const S_flat = new Float32Array(n * N);
+      for (let i = 0; i < n; i++) {
+        const baseW_i = i * n, baseS_i = i * N;
+        for (let k = 0; k < N; k++) {
+          let acc = 0;
+          for (let j = 0; j < n; j++) {
+            acc += W_flat[baseW_i + j] * Xw_flat[j * N + k];
+          }
+          S_flat[baseS_i + k] = acc;
+        }
+      }
+      function invertFlatNxN(M_flat, n) {
+        const A_flat = new Float32Array(n * n), I_flat = new Float32Array(n * n);
+        A_flat.set(M_flat);
+        for (let i = 0; i < n; i++) I_flat[i * n + i] = 1;
+        const aug = new Float32Array(n * (2 * n));
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            aug[i * (2 * n) + j] = A_flat[i * n + j];
+            aug[i * (2 * n) + (n + j)] = I_flat[i * n + j];
+          }
+        }
+        for (let i = 0; i < n; i++) {
+          let maxRow = i;
+          for (let r = i + 1; r < n; r++) {
+            if (Math.abs(aug[r * (2 * n) + i]) > Math.abs(aug[maxRow * (2 * n) + i])) {
+              maxRow = r;
+            }
+          }
+          if (Math.abs(aug[maxRow * (2 * n) + i]) < 1e-12) {
+            throw new Error("Singular matrix");
+          }
+          if (maxRow !== i) {
+            for (let c = 0; c < 2 * n; c++) {
+              const tmp = aug[i * (2 * n) + c];
+              aug[i * (2 * n) + c] = aug[maxRow * (2 * n) + c];
+              aug[maxRow * (2 * n) + c] = tmp;
+            }
+          }
+          const pivot = aug[i * (2 * n) + i];
+          for (let c = 0; c < 2 * n; c++) {
+            aug[i * (2 * n) + c] /= pivot;
+          }
+          for (let r = 0; r < n; r++) {
+            if (r === i) continue;
+            const factor = aug[r * (2 * n) + i];
+            for (let c = 0; c < 2 * n; c++) {
+              aug[r * (2 * n) + c] -= factor * aug[i * (2 * n) + c];
             }
           }
         }
+        const M_inv_flat = new Float32Array(n * n);
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            M_inv_flat[i * n + j] = aug[i * (2 * n) + (n + j)];
+          }
+        }
+        return M_inv_flat;
       }
-      return aug.map(row => row.slice(n));
-    }
-    const Dsqrt = Array.from({length: n}, (_, i) =>
-      Array.from({length: n}, (_, j) => (i === j ? Math.sqrt(D[i] || 0) : 0))
-    );
-    const Winv = invertNxN(W);
-    const EDsqrt = matrixMultiply(E, Dsqrt);
-    const A = matrixMultiply(EDsqrt, Winv); // n×n
-    // (g) Reconstruct Xc_rec = A·S, then add means
-    const Xc_rec = matrixMultiply(A, S); // n×N
-    const μ = X.map(row => mean1D(row));
-    const Xrec = Xc_rec.map((row, i) =>
-      row.map(v => v + μ[i])
-    );
-    return { ICs: S, mixingMat: A, demixMat: W, reconstructed: Xrec };
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // 6) fastICA_2x2 as special case
-  // ──────────────────────────────────────────────────────────
-  function fastICA_2x2(signals, tol = 1e-6, maxIter = 200) {
-    const N = signals[0].length;
-    const Xc0 = subtractMean1D(signals[0]);
-    const Xc1 = subtractMean1D(signals[1]);
-    const meanVec = [ mean1D(signals[0]), mean1D(signals[1]) ];
-    let s00 = 0, s11 = 0, s01 = 0;
-    for (let k = 0; k < N; k++) {
-      s00 += Xc0[k]*Xc0[k];
-      s11 += Xc1[k]*Xc1[k];
-      s01 += Xc0[k]*Xc1[k];
-    }
-    const cov00 = s00 / N, cov11 = s11 / N, cov01 = s01 / N;
-    const tr = cov00 + cov11;
-    const det = cov00*cov11 - cov01*cov01;
-    const discrim = Math.sqrt(Math.max(tr*tr - 4*det, 0));
-    const λ1 = 0.5*(tr + discrim), λ2 = 0.5*(tr - discrim);
-    let e1 = (Math.abs(cov01) > 1e-12)
-      ? [ cov01, λ1 - cov00 ]
-      : (cov00 >= cov11 ? [1, 0] : [0, 1]);
-    const nE1 = Math.hypot(e1[0], e1[1]) || 1e-12;
-    e1 = [ e1[0]/nE1, e1[1]/nE1 ];
-    const e2 = [ -e1[1], e1[0] ];
-    const E = [[e1[0], e2[0]], [e1[1], e2[1]]];
-    const DinvSqrt = [1/Math.sqrt(λ1||1e-12), 1/Math.sqrt(λ2||1e-12)];
-    const Xw = [ new Array(N).fill(0), new Array(N).fill(0) ];
-    for (let k = 0; k < N; k++) {
-      const x0 = Xc0[k], x1 = Xc1[k];
-      const dot1 = e1[0]*x0 + e1[1]*x1;
-      const dot2 = e2[0]*x0 + e2[1]*x1;
-      Xw[0][k] = dot1 * DinvSqrt[0];
-      Xw[1][k] = dot2 * DinvSqrt[1];
-    }
-    let wCols = [
-      [ Math.random(), Math.random() ],
-      [ Math.random(), Math.random() ]
-    ];
-    for (let i = 0; i < 2; i++) {
-      const norm = Math.hypot(wCols[i][0], wCols[i][1]) || 1e-12;
-      wCols[i][0] /= norm; wCols[i][1] /= norm;
-    }
-    for (let iComp = 0; iComp < 2; iComp++) {
-      let w = wCols[iComp].slice();
-      for (let iter = 0; iter < maxIter; iter++) {
-        const wtx = new Array(N);
+      const Dsqrt_flat = new Float32Array(n * n);
+      for (let i = 0; i < n; i++) {
+        Dsqrt_flat[i * n + i] = Math.sqrt(D[i] || 0);
+      }
+      const Winv_flat = invertFlatNxN(W_flat, n);
+      const EDsqrt_flat = matrixMultiply(E_flat, n, n, Dsqrt_flat, n);
+      const A_flat = matrixMultiply(EDsqrt_flat, n, n, Winv_flat, n);
+      const Xc_rec_flat = matrixMultiply(A_flat, n, n, S_flat, N);
+      const μ = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let sum = 0;
+        const base = i * N;
+        for (let k = 0; k < N; k++) sum += Xc_flat[base + k];
+        μ[i] = sum / N;
+      }
+      const Xrec_flat = new Float32Array(n * N);
+      for (let i = 0; i < n; i++) {
+        const baseXc = i * N;
         for (let k = 0; k < N; k++) {
-          wtx[k] = w[0]*Xw[0][k] + w[1]*Xw[1][k];
+          Xrec_flat[baseXc + k] = Xc_rec_flat[baseXc + k] + μ[i];
         }
-        const gw = new Array(N), gPw = new Array(N);
+      }
+      return {
+        ICs: S_flat,
+        mixingMat: A_flat,
+        demixMat: W_flat,
+        reconstructed: Xrec_flat
+      };
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 6) fastICA_2x2 specialized
+    // ──────────────────────────────────────────────────────────
+    function fastICA_2x2(signals, tol = 1e-6, maxIter = 200) {
+      const [sig0, sig1] = signals;
+      const N = sig0.length;
+      const Xc0 = subtractMean1D(sig0);
+      const Xc1 = subtractMean1D(sig1);
+      const μ0 = mean1D(sig0), μ1 = mean1D(sig1);
+      let s00 = 0, s11 = 0, s01 = 0;
+      for (let k = 0; k < N; k++) {
+        s00 += Xc0[k] * Xc0[k];
+        s11 += Xc1[k] * Xc1[k];
+        s01 += Xc0[k] * Xc1[k];
+      }
+      const cov00 = s00 / N, cov11 = s11 / N, cov01 = s01 / N;
+      const tr = cov00 + cov11;
+      const det = cov00 * cov11 - cov01 * cov01;
+      const discrim = Math.sqrt(Math.max(tr * tr - 4 * det, 0));
+      const λ1 = 0.5 * (tr + discrim), λ2 = 0.5 * (tr - discrim);
+      let e1x, e1y;
+      if (Math.abs(cov01) > 1e-12) {
+        e1x = cov01; e1y = λ1 - cov00;
+      } else {
+        if (cov00 >= cov11) { e1x = 1; e1y = 0; }
+        else               { e1x = 0; e1y = 1; }
+      }
+      const nrm = Math.hypot(e1x, e1y) || 1e-12;
+      e1x /= nrm; e1y /= nrm;
+      const e2x = -e1y, e2y = e1x;
+      const E_flat = new Float32Array([e1x, e2x, e1y, e2y]);
+      const DinvSqrt0 = 1 / Math.sqrt(λ1 || 1e-12);
+      const DinvSqrt1 = 1 / Math.sqrt(λ2 || 1e-12);
+      const Xw_flat = new Float32Array(2 * N);
+      for (let k = 0; k < N; k++) {
+        const x0 = Xc0[k], x1 = Xc1[k];
+        const dot1 = e1x * x0 + e1y * x1;
+        const dot2 = e2x * x0 + e2y * x1;
+        Xw_flat[0 * N + k] = dot1 * DinvSqrt0;
+        Xw_flat[1 * N + k] = dot2 * DinvSqrt1;
+      }
+      const wCols0 = new Float32Array([Math.random(), Math.random()]);
+      const wCols1 = new Float32Array([Math.random(), Math.random()]);
+      {
+        let n0 = Math.hypot(wCols0[0], wCols0[1]) || 1e-12;
+        wCols0[0] /= n0; wCols0[1] /= n0;
+      }
+      {
+        let n1 = Math.hypot(wCols1[0], wCols1[1]) || 1e-12;
+        wCols1[0] /= n1; wCols1[1] /= n1;
+      }
+      let W_flat = new Float32Array([
+        wCols0[0], wCols0[1],
+        wCols1[0], wCols1[1]
+      ]);
+      for (let ic = 0; ic < 2; ic++) {
+        let wX = new Float32Array([ W_flat[ic * 2 + 0], W_flat[ic * 2 + 1] ]);
+        for (let iter = 0; iter < maxIter; iter++) {
+          const wtx = new Float32Array(N);
+          for (let k = 0; k < N; k++) {
+            wtx[k] = wX[0] * Xw_flat[0 * N + k] + wX[1] * Xw_flat[1 * N + k];
+          }
+          const gw = new Float32Array(N), gPw = new Float32Array(N);
+          for (let k = 0; k < N; k++) {
+            const t = Math.tanh(wtx[k]);
+            gw[k] = t; gPw[k] = 1 - t * t;
+          }
+          let sumGp = 0;
+          for (let k = 0; k < N; k++) sumGp += gPw[k];
+          sumGp /= N;
+          const wNew = new Float32Array(2);
+          for (let i = 0; i < 2; i++) {
+            let acc = 0;
+            for (let k = 0; k < N; k++) {
+              acc += Xw_flat[i * N + k] * gw[k];
+            }
+            wNew[i] = acc / N - sumGp * wX[i];
+          }
+          if (ic > 0) {
+            const w0 = new Float32Array([ W_flat[0], W_flat[1] ]);
+            const proj = wNew[0] * w0[0] + wNew[1] * w0[1];
+            wNew[0] -= proj * w0[0];
+            wNew[1] -= proj * w0[1];
+          }
+          const nNew = Math.hypot(wNew[0], wNew[1]) || 1e-12;
+          wNew[0] /= nNew; wNew[1] /= nNew;
+          const corr = wNew[0] * wX[0] + wNew[1] * wX[1];
+          if (Math.abs(Math.abs(corr) - 1) < tol) {
+            wX[0] = wNew[0]; wX[1] = wNew[1];
+            break;
+          }
+          wX[0] = wNew[0]; wX[1] = wNew[1];
+        }
+        W_flat[ic * 2 + 0] = wX[0];
+        W_flat[ic * 2 + 1] = wX[1];
+      }
+      const S_flat = new Float32Array(2 * N);
+      for (let i = 0; i < 2; i++) {
+        const baseW_i = i * 2, baseS_i = i * N;
         for (let k = 0; k < N; k++) {
-          const t = Math.tanh(wtx[k]);
-          gw[k] = t; gPw[k] = 1 - t*t;
+          S_flat[baseS_i + k] = W_flat[baseW_i + 0] * Xw_flat[0 * N + k]
+                              + W_flat[baseW_i + 1] * Xw_flat[1 * N + k];
         }
-        const sumGp = gPw.reduce((a,b) => a+b, 0)/N;
-        const wNew = [0, 0];
-        for (let i = 0; i < 2; i++) {
-          let acc = 0;
-          for (let k = 0; k < N; k++) acc += Xw[i][k] * gw[k];
-          wNew[i] = acc/N - sumGp * w[i];
-        }
-        if (iComp > 0) {
-          const w0 = wCols[0];
-          const proj = wNew[0]*w0[0] + wNew[1]*w0[1];
-          wNew[0] -= proj * w0[0];
-          wNew[1] -= proj * w0[1];
-        }
-        const nNew = Math.hypot(wNew[0], wNew[1]) || 1e-12;
-        wNew[0] /= nNew; wNew[1] /= nNew;
-        const corr = wNew[0]*w[0] + wNew[1]*w[1];
-        if (Math.abs(Math.abs(corr) - 1) < tol) {
-          w = wNew.slice();
-          break;
-        }
-        w = wNew.slice();
       }
-      wCols[iComp] = w.slice();
+      function invert2x2(M2_flat) {
+        const a = M2_flat[0], b = M2_flat[1], c = M2_flat[2], d = M2_flat[3];
+        const det = a * d - b * c || 1e-12;
+        return new Float32Array([ d / det, -b / det, -c / det, a / det ]);
+      }
+      const Dsqrt_flat = new Float32Array([ Math.sqrt(λ1 || 0), 0, 0, Math.sqrt(λ2 || 0) ]);
+      const Winv_flat = invert2x2(W_flat);
+      const EDsqrt_flat = new Float32Array(4);
+      EDsqrt_flat[0] = E_flat[0] * Dsqrt_flat[0] + E_flat[1] * Dsqrt_flat[2];
+      EDsqrt_flat[1] = E_flat[0] * Dsqrt_flat[1] + E_flat[1] * Dsqrt_flat[3];
+      EDsqrt_flat[2] = E_flat[2] * Dsqrt_flat[0] + E_flat[3] * Dsqrt_flat[2];
+      EDsqrt_flat[3] = E_flat[2] * Dsqrt_flat[1] + E_flat[3] * Dsqrt_flat[3];
+      const A_flat = new Float32Array(4);
+      A_flat[0] = EDsqrt_flat[0] * Winv_flat[0] + EDsqrt_flat[1] * Winv_flat[2];
+      A_flat[1] = EDsqrt_flat[0] * Winv_flat[1] + EDsqrt_flat[1] * Winv_flat[3];
+      A_flat[2] = EDsqrt_flat[2] * Winv_flat[0] + EDsqrt_flat[3] * Winv_flat[2];
+      A_flat[3] = EDsqrt_flat[2] * Winv_flat[1] + EDsqrt_flat[3] * Winv_flat[3];
+      const Xc_rec_flat = new Float32Array(2 * N);
+      for (let k = 0; k < N; k++) {
+        Xc_rec_flat[0 * N + k] = A_flat[0] * S_flat[0 * N + k] + A_flat[1] * S_flat[1 * N + k];
+        Xc_rec_flat[1 * N + k] = A_flat[2] * S_flat[0 * N + k] + A_flat[3] * S_flat[1 * N + k];
+      }
+      const rec0 = new Float32Array(N), rec1 = new Float32Array(N);
+      for (let k = 0; k < N; k++) {
+        rec0[k] = Xc_rec_flat[0 * N + k] + μ0;
+        rec1[k] = Xc_rec_flat[1 * N + k] + μ1;
+      }
+      return { ICs: S_flat, mixingMat: A_flat, demixMat: W_flat, rec0, rec1 };
     }
-    const Wmat = [
-      [ wCols[0][0], wCols[1][0] ],
-      [ wCols[0][1], wCols[1][1] ]
-    ];
-    const S = matrixMultiply(Wmat, Xw);
-    function invert2x2(M) {
-      const a=M[0][0], b=M[0][1], c=M[1][0], d=M[1][1];
-      const detM = a*d - b*c || 1e-12;
-      return [[d/detM, -b/detM], [-c/detM, a/detM]];
-    }
-    const Winv = invert2x2(Wmat);
-    const Dsqrt = [[Math.sqrt(λ1||0),0],[0,Math.sqrt(λ2||0)]];
-    const ED = matrixMultiply(E, Dsqrt);
-    const A = matrixMultiply(ED, Winv);
-    const Xc_rec = matrixMultiply(A, S);
-    const rec0 = new Array(N), rec1 = new Array(N);
-    for (let k = 0; k < N; k++) {
-      rec0[k] = Xc_rec[0][k] + meanVec[0];
-      rec1[k] = Xc_rec[1][k] + meanVec[1];
-    }
-    return {
-      ICs:        S,
-      mixingMat:  A,
-      demixMat:   Wmat,
-      recSignal1: rec0,
-      recSignal2: rec1
-    };
-  }
 
-  // ──────────────────────────────────────────────────────────
-  // 6) Estimate dominant frequency (small DFT)
-  // ──────────────────────────────────────────────────────────
-  function estimateDominantFreq(signal, fs) {
-    const N = signal.length, half = Math.floor(N/2);
-    let bestF = 0, bestMag = 0;
-    for (let k = 1; k <= half; k++) {
-      let re = 0, im = 0;
-      const ω = (2 * Math.PI * k) / N;
-      for (let n = 0; n < N; n++) {
-        re += signal[n] * Math.cos(ω * n);
-        im -= signal[n] * Math.sin(ω * n);
+    // ──────────────────────────────────────────────────────────
+    // 7) Estimate dominant frequency
+    // ──────────────────────────────────────────────────────────
+    function estimateDominantFreq(signal, fs) {
+      const N = signal.length, half = Math.floor(N / 2);
+      let bestF = 0, bestMag = 0;
+      for (let k = 1; k <= half; k++) {
+        let re = 0, im = 0;
+        const ω = (2 * Math.PI * k) / N;
+        for (let n = 0; n < N; n++) {
+          re += signal[n] * Math.cos(ω * n);
+          im -= signal[n] * Math.sin(ω * n);
+        }
+        const mag = Math.hypot(re, im);
+        if (mag > bestMag) {
+          bestMag = mag;
+          bestF = (k * fs) / N;
+        }
       }
-      const mag = Math.hypot(re, im);
-      if (mag > bestMag) {
-        bestMag = mag;
-        bestF = (k * fs) / N;
-      }
+      return bestF;
     }
-    return bestF;
-  }
 
-  // ──────────────────────────────────────────────────────────
-  // 7) Draw utilities: drawSignal & overlay
-  // ──────────────────────────────────────────────────────────
-  function drawSignal(canvas, sig, color) {
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width, H = canvas.height;
-    ctx.clearRect(0, 0, W, H);
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    const N = sig.length;
-    const m = Math.max(...sig.map(v => Math.abs(v))) || 1e-12;
-    for (let i = 0; i < N; i++) {
-      const x = (i / (N - 1)) * W;
-      const y = H/2 - (sig[i]/m) * (H * 0.4);
-      if (i === 0) ctx.moveTo(x, y);
-      else         ctx.lineTo(x, y);
+    // ──────────────────────────────────────────────────────────
+    // 8) Worker message handling
+    // ──────────────────────────────────────────────────────────
+    self.addEventListener("message", (evt) => {
+      const msg = evt.data;
+      if (msg.type === "run2x2") {
+        const [ch0, ch1] = msg.data;
+        const result = fastICA_2x2([new Float32Array(ch0), new Float32Array(ch1)]);
+        const fsamp = msg.fs || 1;
+        const domFreqs = new Float32Array(2);
+        domFreqs[0] = estimateDominantFreq(result.ICs.subarray(0 * msg.N, 1 * msg.N), fsamp);
+        domFreqs[1] = estimateDominantFreq(result.ICs.subarray(1 * msg.N, 2 * msg.N), fsamp);
+        const out = {
+          type: "result2x2",
+          ICs: result.ICs,
+          mixingMat: result.mixingMat,
+          demixMat: result.demixMat,
+          rec0: result.rec0,
+          rec1: result.rec1,
+          domFreqs
+        };
+        self.postMessage(out, [
+          out.ICs.buffer,
+          out.mixingMat.buffer,
+          out.demixMat.buffer,
+          out.rec0.buffer,
+          out.rec1.buffer,
+          out.domFreqs.buffer
+        ]);
+      }
+      if (msg.type === "runNxN") {
+        const n = msg.n, N = msg.N;
+        const X_flat = new Float32Array(n * N);
+        for (let i = 0; i < n; i++) {
+          X_flat.set(new Float32Array(msg.data[i]), i * N);
+        }
+        const { ICs, mixingMat, demixMat, reconstructed } = fastICA_n(X_flat, n, N);
+        const corrs = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          const origRow = new Float32Array(msg.data[i]);
+          const recRow = reconstructed.subarray(i * N, (i + 1) * N);
+          corrs[i] = pearsonCorr(origRow, recRow);
+        }
+        const freqs = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          freqs[i] = estimateDominantFreq(ICs.subarray(i * N, (i + 1) * N), msg.fs || 1);
+        }
+        const out = {
+          type: "resultNxN",
+          ICs,
+          mixingMat,
+          demixMat,
+          reconstructed,
+          corrs,
+          domFreqs: freqs
+        };
+        self.postMessage(out, [
+          ICs.buffer,
+          mixingMat.buffer,
+          demixMat.buffer,
+          reconstructed.buffer,
+          corrs.buffer,
+          freqs.buffer
+        ]);
+      }
+    });
+  `;
+    // Create worker from code string
+    const blob = new Blob([workerCode], { type: "application/javascript" });
+    const workerUrl = URL.createObjectURL(blob);
+    const icaWorker = new Worker(workerUrl);
+
+    // ──────────────────────────────────────────────────────────
+    // Main-thread helper functions
+    // ──────────────────────────────────────────────────────────
+    function mean1D(arr) {
+      let s = 0;
+      for (let v of arr) s += v;
+      return s / arr.length;
     }
-    ctx.stroke();
-  }
-  function overlaySignals(canvas, signals, colors) {
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width, H = canvas.height;
-    ctx.clearRect(0, 0, W, H);
-    signals.forEach((sig, idx) => {
-      ctx.globalAlpha = idx === 0 ? 1.0 : 0.6;
+    function subtractMean1D(arr) {
+      const μ = mean1D(arr);
+      return arr.map(v => v - μ);
+    }
+    function pearsonCorr(x, y) {
+      const N = x.length;
+      const μx = mean1D(x), μy = mean1D(y);
+      let num = 0, sx = 0, sy = 0;
+      for (let i = 0; i < N; i++) {
+        const dx = x[i] - μx, dy = y[i] - μy;
+        num += dx * dy;
+        sx += dx * dx;
+        sy += dy * dy;
+      }
+      return num / (Math.sqrt(sx * sy) || 1e-12);
+    }
+    function drawSignal(canvas, sig, color) {
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
       ctx.beginPath();
-      ctx.strokeStyle = colors[idx];
+      ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       const N = sig.length;
       const m = Math.max(...sig.map(v => Math.abs(v))) || 1e-12;
       for (let i = 0; i < N; i++) {
         const x = (i / (N - 1)) * W;
-        const y = H/2 - (sig[i]/m) * (H * 0.4);
+        const y = H / 2 - (sig[i] / m) * (H * 0.4);
         if (i === 0) ctx.moveTo(x, y);
-        else         ctx.lineTo(x, y);
+        else ctx.lineTo(x, y);
       }
       ctx.stroke();
-    });
-    ctx.globalAlpha = 1.0;
-  }
-
-  // ──────────────────────────────────────────────────────────
-  // 8) Generate two sinusoids (5 Hz & 10 Hz), mix them
-  // ──────────────────────────────────────────────────────────
-  function generateSine(freq, phase, dur, N) {
-    return Array.from({length: N}, (_, i) => {
-      const t = (i / N) * dur;
-      return Math.sin(2 * Math.PI * freq * t + phase);
-    });
-  }
-  const duration = 1.0, samples = 1000;
-  const pure1 = generateSine(5, 0, duration, samples);
-  const pure2 = generateSine(10, Math.PI/3, duration, samples);
-  const mix1 = new Array(samples), mix2 = new Array(samples);
-  for (let i = 0; i < samples; i++) {
-    mix1[i] = 0.7*pure1[i] + 0.3*pure2[i];
-    mix2[i] = 0.3*pure1[i] + 0.7*pure2[i];
-  }
-  const fs = samples / duration;
-
-  // PCA vs ICA (2×2)
-  const { recSignal1: recPCA1 } = pcaReconstruct1([mix1, mix2]);
-  const corrPCA = pearsonCorr(mix1, recPCA1);
-  const { ICs, recSignal1: recICA1 } = fastICA_2x2([mix1, mix2]);
-  const corrICA = pearsonCorr(mix1, recICA1);
-  const demF1 = estimateDominantFreq(ICs[0], fs), demF2 = estimateDominantFreq(ICs[1], fs);
-
-  // Draw overlay (mix1 / PCA / ICA)
-  const c1 = document.createElement('canvas');
-  c1.width = 1000; c1.height = 200;
-  document.body.appendChild(c1);
-  overlaySignals(c1, [mix1, recPCA1, recICA1], ['white','yellow','magenta']);
-  const legend1 = document.createElement('div');
-  legend1.className = 'legend';
-  [
-    {color:'white', label:'Mix1'},
-    {color:'yellow', label:'PCA(n=1)'},
-    {color:'magenta', label:'ICA(n=2)'}
-  ].forEach(item => {
-    const div = document.createElement('div');
-    div.className = 'legend-item';
-    const sw = document.createElement('div');
-    sw.className = 'swatch';
-    sw.style.backgroundColor = item.color;
-    div.appendChild(sw);
-    const txt = document.createElement('span');
-    txt.textContent = item.label;
-    div.appendChild(txt);
-    legend1.appendChild(div);
-  });
-  document.body.appendChild(legend1);
-  const pRes1 = document.createElement('p');
-  pRes1.className = 'result';
-  pRes1.innerHTML = `• Demixed freqs: IC₁=${demF1.toFixed(2)} Hz, IC₂=${demF2.toFixed(2)} Hz<br>• Corr: PCA(${corrPCA.toFixed(2)}), ICA(${corrICA.toFixed(2)})`;
-  document.body.appendChild(pRes1);
-
-  // Plot ICs
-  ['lime','orange'].forEach((col, idx) => {
-    const cIC = document.createElement('canvas');
-    cIC.width = 1000; cIC.height = 200;
-    document.body.appendChild(cIC);
-    drawSignal(cIC, ICs[idx], col);
-    const pIC = document.createElement('p');
-    pIC.className = 'caption';
-    pIC.textContent = `Recovered IC${idx+1} (${col})`;
-    document.body.appendChild(pIC);
-  });
-  const notes1 = [
-    "• PCA(n=1) (yellow) captures only one direction → moderate corr (~0.93).",
-    "• ICA(n=2) (magenta) cleanly recovers both 5 Hz & 10 Hz → high corr (~0.99)."
-  ];
-  notes1.forEach(txt => {
-    const p = document.createElement('p');
-    p.className = 'note';
-    p.textContent = txt;
-    document.body.appendChild(p);
-  });
-</script>
-
-  <h2>Demo 2: Five Frequencies (3, 5, 7, 11, 13 Hz) into Two Channels</h2>
-<script>
-  // Reuse helpers above
-  // 1) Generate five sinusoids
-  const freqs5 = [3, 5, 7, 11, 13];
-  const phases5 = [0, Math.PI/6, Math.PI/3, Math.PI/4, Math.PI/5];
-  const pure5 = freqs5.map((f,i) => generateSine(f, phases5[i], duration, samples));
-
-  // 2) Mix into 2 channels
-  const A5_2 = [
-    [0.5, 0.3, 0.1, 0.4, 0.2],
-    [0.2, 0.6, 0.4, 0.1, 0.3]
-  ];
-  const mix5_1 = new Array(samples).fill(0);
-  const mix5_2 = new Array(samples).fill(0);
-  for (let k = 0; k < samples; k++) {
-    let s1 = 0, s2 = 0;
-    for (let i = 0; i < 5; i++) {
-      s1 += A5_2[0][i] * pure5[i][k];
-      s2 += A5_2[1][i] * pure5[i][k];
     }
-    mix5_1[k] = s1;
-    mix5_2[k] = s2;
-  }
-
-  // PCA(n=1) & ICA(n=2)
-  const { recSignal1: rec5_PCA1 } = pcaReconstruct1([mix5_1, mix5_2]);
-  const corr5_PCA = pearsonCorr(mix5_1, rec5_PCA1);
-  const { ICs: ICs5_2, recSignal1: rec5_ICA1 } = fastICA_2x2([mix5_1, mix5_2]);
-  const corr5_ICA = pearsonCorr(mix5_1, rec5_ICA1);
-  const dem5_1 = estimateDominantFreq(ICs5_2[0], fs);
-  const dem5_2 = estimateDominantFreq(ICs5_2[1], fs);
-
-  // Overlay mix1 / PCA / ICA
-  const c2 = document.createElement('canvas');
-  c2.width = 1000; c2.height = 200;
-  document.body.appendChild(c2);
-  overlaySignals(c2, [mix5_1, rec5_PCA1, rec5_ICA1], ['white','yellow','magenta']);
-  const legend2 = document.createElement('div');
-  legend2.className = 'legend';
-  [
-    {color:'white', label:'Mix1'},
-    {color:'yellow', label:'PCA(n=1)'},
-    {color:'magenta', label:'ICA(n=2)'}
-  ].forEach(item => {
-    const div = document.createElement('div');
-    div.className = 'legend-item';
-    const sw = document.createElement('div');
-    sw.className = 'swatch';
-    sw.style.backgroundColor = item.color;
-    div.appendChild(sw);
-    const txt = document.createElement('span');
-    txt.textContent = item.label;
-    div.appendChild(txt);
-    legend2.appendChild(div);
-  });
-  document.body.appendChild(legend2);
-  const pRes2 = document.createElement('p');
-  pRes2.className = 'result';
-  pRes2.innerHTML = `• Demixed freqs: IC₁≈${dem5_1.toFixed(2)} Hz, IC₂≈${dem5_2.toFixed(2)} Hz<br>• Corr: PCA(${corr5_PCA.toFixed(2)}), ICA(${corr5_ICA.toFixed(2)})`;
-  document.body.appendChild(pRes2);
-
-  // Plot ICs
-  ['lime','orange'].forEach((col, idx) => {
-    const cIC = document.createElement('canvas');
-    cIC.width = 1000; cIC.height = 200;
-    document.body.appendChild(cIC);
-    drawSignal(cIC, ICs5_2[idx], col);
-    const pIC = document.createElement('p');
-    pIC.className = 'caption';
-    pIC.textContent = `Recovered IC${idx+1} (${col})`;
-    document.body.appendChild(pIC);
-  });
-  const notes2 = [
-    "• In this 5-freq, 2-channel mix, PCA(n=1) (yellow) yields low corr (~0.31).",
-    "• ICA(n=2) (magenta) recovers two mixtures → corr ~0.45; each IC blends several frequencies."
-  ];
-  notes2.forEach(txt => {
-    const p = document.createElement('p');
-    p.className = 'note';
-    p.textContent = txt;
-    document.body.appendChild(p);
-  });
-</script>
-
-  <h2>Demo 3: Five Frequencies into Five Channels</h2>
-<script>
-  // 1) Use pure5 from above
-  // 2) Mix into 5 channels
-  const mix5_5 = Array.from({length: 5}, () => new Array(samples).fill(0));
-  const A5_5 = [
-    [0.4, 0.2, 0.1, 0.3, 0.5],
-    [0.3, 0.5, 0.2, 0.1, 0.4],
-    [0.1, 0.3, 0.6, 0.2, 0.1],
-    [0.2, 0.1, 0.3, 0.5, 0.4],
-    [0.5, 0.4, 0.1, 0.2, 0.3]
-  ];
-  for (let k = 0; k < samples; k++) {
-    for (let i = 0; i < 5; i++) {
-      let s = 0;
-      for (let j = 0; j < 5; j++) s += A5_5[i][j] * pure5[j][k];
-      mix5_5[i][k] = s;
+    function overlaySignals(canvas, signals, colors) {
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      signals.forEach((sig, idx) => {
+        ctx.globalAlpha = idx === 0 ? 1.0 : 0.6;
+        ctx.beginPath();
+        ctx.strokeStyle = colors[idx];
+        ctx.lineWidth = 1.5;
+        const N = sig.length;
+        const m = Math.max(...sig.map(v => Math.abs(v))) || 1e-12;
+        for (let i = 0; i < N; i++) {
+          const x = (i / (N - 1)) * W;
+          const y = H / 2 - (sig[i] / m) * (H * 0.4);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+      ctx.globalAlpha = 1.0;
     }
-  }
 
-  // 3) Run fastICA_n with n=5
-  const ICA5_5 = fastICA_n(mix5_5);
-  const ICs5_5 = ICA5_5.ICs; // 5×1000
-  const Xrec5_5 = ICA5_5.reconstructed; // 5×1000
-  const corr5ch = mix5_5.map((m, i) => pearsonCorr(m, Xrec5_5[i]));
-  const dem5ch = ICs5_5.map(ic => estimateDominantFreq(ic, fs));
+    // ──────────────────────────────────────────────────────────
+    // PCA rank-1 (for main thread)
+    // ──────────────────────────────────────────────────────────
+    function pcaReconstruct1_sync(signals) {
+      const [sig0, sig1] = signals;
+      const N = sig0.length;
+      const Xc0 = subtractMean1D(sig0);
+      const Xc1 = subtractMean1D(sig1);
+      const μ0 = mean1D(sig0), μ1 = mean1D(sig1);
+      let s00 = 0, s11 = 0, s01 = 0;
+      for (let k = 0; k < N; k++) {
+        s00 += Xc0[k] * Xc0[k];
+        s11 += Xc1[k] * Xc1[k];
+        s01 += Xc0[k] * Xc1[k];
+      }
+      const cov00 = s00 / N, cov11 = s11 / N, cov01 = s01 / N;
+      const tr = cov00 + cov11;
+      const det = cov00 * cov11 - cov01 * cov01;
+      const discrim = Math.sqrt(Math.max(tr * tr - 4 * det, 0));
+      const λ1 = 0.5 * (tr + discrim);
+      let e1x, e1y;
+      if (Math.abs(cov01) > 1e-12) {
+        e1x = cov01; e1y = λ1 - cov00;
+      } else {
+        if (cov00 >= cov11) { e1x = 1; e1y = 0; }
+        else { e1x = 0; e1y = 1; }
+      }
+      const nrm = Math.hypot(e1x, e1y) || 1e-12;
+      e1x /= nrm; e1y /= nrm;
+      const scores = new Array(N);
+      for (let k = 0; k < N; k++) {
+        scores[k] = e1x * Xc0[k] + e1y * Xc1[k];
+      }
+      const rec0 = new Array(N), rec1 = new Array(N);
+      for (let k = 0; k < N; k++) {
+        rec0[k] = scores[k] * e1x + μ0;
+        rec1[k] = scores[k] * e1y + μ1;
+      }
+      return { recSignal1: rec0, recSignal2: rec1 };
+    }
 
-  // Overlay channel1 original vs reconstructed
-  const c3 = document.createElement('canvas');
-  c3.width = 1000; c3.height = 200;
-  document.body.appendChild(c3);
-  overlaySignals(c3, [mix5_5[0], Xrec5_5[0]], ['white','magenta']);
-  const legend3 = document.createElement('div');
-  legend3.className = 'legend';
-  [
-    {color:'white', label:'Mix₁'},
-    {color:'magenta', label:'ICA rec₁'}
-  ].forEach(item => {
-    const div = document.createElement('div');
-    div.className = 'legend-item';
-    const sw = document.createElement('div');
-    sw.className = 'swatch';
-    sw.style.backgroundColor = item.color;
-    div.appendChild(sw);
-    const txt = document.createElement('span');
-    txt.textContent = item.label;
-    div.appendChild(txt);
-    legend3.appendChild(div);
-  });
-  document.body.appendChild(legend3);
-  const pRes3 = document.createElement('p');
-  pRes3.className = 'result';
-  pRes3.innerHTML = `• Ch₁ corr: ${corr5ch[0].toFixed(2)}<br>• IC freqs: ${dem5ch.map(f => f.toFixed(2)).join(' Hz, ')} Hz`;
-  document.body.appendChild(pRes3);
+    // ──────────────────────────────────────────────────────────
+    // Helper: generate sine as Float32Array
+    // ──────────────────────────────────────────────────────────
+    function generateSine(freq, phase, dur, N) {
+      const out = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const t = (i / N) * dur;
+        out[i] = Math.sin(2 * Math.PI * freq * t + phase);
+      }
+      return out;
+    }
+  </script>
+  -->
+  <script>
+    // ──────────────────────────────────────────────────────────
+    // Helper: wrap a 2×2 ICA worker call in a Promise
+    // ──────────────────────────────────────────────────────────
+    function run2x2Promise(ch0, ch1, samples, fs) {
+      return new Promise((resolve) => {
+        // Create a one‐time listener
+        const listener = (evt) => {
+          const msg = evt.data;
+          if (msg.type === 'result2x2') {
+            icaWorker.removeEventListener('message', listener);
+            resolve(msg);
+          }
+        };
+        icaWorker.addEventListener('message', listener);
 
-  // Plot each recovered IC
-  const icColors = ['lime','orange','cyan','yellow','magenta'];
-  ICs5_5.forEach((ic, idx) => {
-    const cIC = document.createElement('canvas');
-    cIC.width = 1000; cIC.height = 200;
-    document.body.appendChild(cIC);
-    drawSignal(cIC, ic, icColors[idx]);
-    const pIC = document.createElement('p');
-    pIC.className = 'caption';
-    pIC.textContent = `IC${idx+1} (${icColors[idx]}) → ~${dem5ch[idx].toFixed(2)} Hz`;
-    document.body.appendChild(pIC);
-  });
-  const notes3 = [
-    "• In the 5×5 case, ICA(n=5) fully recovers each sinusoid → high correlation on all channels.",
-    "• Each IC is nearly a pure sinusoid at one of the original frequencies."
-  ];
-  notes3.forEach(txt => {
-    const p = document.createElement('p');
-    p.className = 'note';
-    p.textContent = txt;
-    document.body.appendChild(p);
-  });
-</script>
+        // Post the message (transfer the buffers)
+        icaWorker.postMessage(
+          {
+            type: 'run2x2',
+            data: [ch0, ch1],
+            n: 2,
+            N: samples,
+            fs: fs
+          },
+          [ch0.buffer, ch1.buffer]
+        );
+      });
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Helper: wrap an n×n ICA worker call in a Promise
+    // ──────────────────────────────────────────────────────────
+    function runNxNPromise(channelsArray, samples, fs) {
+      return new Promise((resolve) => {
+        const listener = (evt) => {
+          const msg = evt.data;
+          if (msg.type === 'resultNxN') {
+            icaWorker.removeEventListener('message', listener);
+            resolve(msg);
+          }
+        };
+        icaWorker.addEventListener('message', listener);
+
+        // Extract the buffers to transfer
+        const buffers = channelsArray.map(arr => arr.buffer);
+        icaWorker.postMessage(
+          {
+            type: 'runNxN',
+            data: channelsArray,
+            n: channelsArray.length,
+            N: samples,
+            fs: fs
+          },
+          buffers
+        );
+      });
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Demo 1: Two sinusoids → two channels (returns Promise)
+    // ──────────────────────────────────────────────────────────
+    async function runDemo1() {
+      const duration = 1.0, samples = 1000;
+      const fs = samples / duration;
+
+      // 1) Generate two pure sinusoids
+      const pure1 = generateSine(5, 0, duration, samples);
+      const pure2 = generateSine(10, Math.PI / 3, duration, samples);
+
+      // 2) Mix into two Float32Array channels
+      const mix1 = new Float32Array(samples), mix2 = new Float32Array(samples);
+      for (let i = 0; i < samples; i++) {
+        mix1[i] = 0.7 * pure1[i] + 0.3 * pure2[i];
+        mix2[i] = 0.3 * pure1[i] + 0.7 * pure2[i];
+      }
+
+      // 3) Keep a normal JS‐array copy for PCA/ICA drawing
+      const mix1Arr = Array.from(mix1);
+      const mix2Arr = Array.from(mix2);
+
+      // 4) PCA (synchronous)
+      const { recSignal1: recPCA1 } = pcaReconstruct1_sync([mix1Arr, mix2Arr]);
+      const corrPCA = pearsonCorr(mix1Arr, recPCA1);
+
+      // 5) Draw mix₁ + PCA
+      const canvas1 = document.createElement('canvas');
+      canvas1.width = 1000;
+      canvas1.height = 200;
+      document.body.appendChild(canvas1);
+      overlaySignals(canvas1, [mix1Arr, recPCA1], ['white', 'yellow']);
+
+      // 6) Legend for mix₁ + PCA
+      const legend1 = document.createElement('div');
+      legend1.className = 'legend';
+      [
+        { color: 'white', label: 'Mix₁' },
+        { color: 'yellow', label: 'PCA(n=1)' }
+      ].forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'swatch';
+        sw.style.backgroundColor = item.color;
+        div.appendChild(sw);
+        const txt = document.createElement('span');
+        txt.textContent = item.label;
+        div.appendChild(txt);
+        legend1.appendChild(div);
+      });
+      document.body.appendChild(legend1);
+
+      // 7) Placeholder while ICA runs
+      const pRes1 = document.createElement('p');
+      pRes1.className = 'result';
+      pRes1.textContent = 'Computing ICA…';
+      document.body.appendChild(pRes1);
+
+      // 8) Clone Float32Arrays before sending to worker
+      const ch0 = new Float32Array(mix1);
+      const ch1 = new Float32Array(mix2);
+
+      // 9) Await the ICA worker to finish
+      const msg = await run2x2Promise(ch0, ch1, samples, fs);
+      const ICs = msg.ICs;      // Float32Array length = 2 * samples
+      const recICA1 = msg.rec0;     // Float32Array length = samples
+      const domFreqs = msg.domFreqs; // Float32Array length = 2
+
+      // 10) Compute ICA correlation using the non-detached copy
+      const corrICA = pearsonCorr(mix1Arr, Array.from(recICA1));
+
+      // 11) Overlay mix₁ + PCA + ICA
+      overlaySignals(canvas1, [mix1Arr, recPCA1, recICA1], ['white', 'yellow', 'magenta']);
+
+      // 12) Update legend to include ICA
+      legend1.innerHTML = '';
+      [
+        { color: 'white', label: 'Mix₁' },
+        { color: 'yellow', label: 'PCA(n=1)' },
+        { color: 'magenta', label: 'ICA(n=2)' }
+      ].forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'swatch';
+        sw.style.backgroundColor = item.color;
+        div.appendChild(sw);
+        const txt = document.createElement('span');
+        txt.textContent = item.label;
+        div.appendChild(txt);
+        legend1.appendChild(div);
+      });
+
+      // 13) Show demixed frequencies & correlations
+      pRes1.innerHTML = `
+                                    • Demixed freqs: IC₁=${domFreqs[0].toFixed(2)} Hz, IC₂=${domFreqs[1].toFixed(2)} Hz<br>
+                                    • Corr: PCA(${corrPCA.toFixed(2)}), ICA(${corrICA.toFixed(2)})
+                                  `;
+
+      // 14) Plot each recovered IC
+      ['lime', 'orange'].forEach((col, idx) => {
+        const cIC = document.createElement('canvas');
+        cIC.width = 1000;
+        cIC.height = 200;
+        document.body.appendChild(cIC);
+        const icSlice = ICs.subarray(idx * samples, (idx + 1) * samples);
+        drawSignal(cIC, icSlice, col);
+        const pIC = document.createElement('p');
+        pIC.className = 'caption';
+        pIC.textContent = `Recovered IC${idx + 1} (${col})`;
+        document.body.appendChild(pIC);
+      });
+
+      // 15) Explanatory notes
+      const notes1 = [
+        '• PCA(n=1) (yellow) captures only one direction → moderate corr (~0.93).',
+        '• ICA(n=2) (magenta) cleanly recovers both 5 Hz & 10 Hz → high corr (~0.99).'
+      ];
+      notes1.forEach(txt => {
+        const p = document.createElement('p');
+        p.className = 'note';
+        p.textContent = txt;
+        document.body.appendChild(p);
+      });
+
+      // Done with Demo 1
+      return;
+    }
+
+
+    // ──────────────────────────────────────────────────────────
+    // Demo 2: Five frequencies → two channels (returns Promise)
+    // ──────────────────────────────────────────────────────────
+    async function runDemo2() {
+      const duration = 1.0, samples = 1000;
+      const fs = samples / duration;
+
+      // 1) Generate five pure sinusoids
+      const freqs5 = [3, 5, 7, 11, 13];
+      const phases5 = [0, Math.PI / 6, Math.PI / 3, Math.PI / 4, Math.PI / 5];
+      const pure5 = freqs5.map((f, i) => generateSine(f, phases5[i], duration, samples));
+
+      // 2) Mix into two Float32Array channels
+      const A5_2 = [
+        [0.5, 0.3, 0.1, 0.4, 0.2],
+        [0.2, 0.6, 0.4, 0.1, 0.3]
+      ];
+      const mix5_1 = new Float32Array(samples);
+      const mix5_2 = new Float32Array(samples);
+      for (let k = 0; k < samples; k++) {
+        let s1 = 0, s2 = 0;
+        for (let i = 0; i < 5; i++) {
+          s1 += A5_2[0][i] * pure5[i][k];
+          s2 += A5_2[1][i] * pure5[i][k];
+        }
+        mix5_1[k] = s1;
+        mix5_2[k] = s2;
+      }
+
+      // 3) Keep normal JS‐array copies
+      const mix5_1Arr = Array.from(mix5_1);
+      const mix5_2Arr = Array.from(mix5_2);
+
+      // 4) PCA (synchronous)
+      const { recSignal1: rec5_PCA1 } = pcaReconstruct1_sync([mix5_1Arr, mix5_2Arr]);
+      const corr5_PCA = pearsonCorr(mix5_1Arr, rec5_PCA1);
+
+      // 5) Draw mix₅₁ + PCA
+      const canvas2 = document.createElement('canvas');
+      canvas2.width = 1000;
+      canvas2.height = 200;
+      document.body.appendChild(canvas2);
+      overlaySignals(canvas2, [mix5_1Arr, rec5_PCA1], ['white', 'yellow']);
+
+      // 6) Legend for mix₅₁ + PCA
+      const legend2 = document.createElement('div');
+      legend2.className = 'legend';
+      [
+        { color: 'white', label: 'Mix₁' },
+        { color: 'yellow', label: 'PCA(n=1)' }
+      ].forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'swatch';
+        sw.style.backgroundColor = item.color;
+        div.appendChild(sw);
+        const txt = document.createElement('span');
+        txt.textContent = item.label;
+        div.appendChild(txt);
+        legend2.appendChild(div);
+      });
+      document.body.appendChild(legend2);
+
+      // 7) Placeholder for ICA result
+      const pRes2 = document.createElement('p');
+      pRes2.className = 'result';
+      pRes2.textContent = 'Computing ICA…';
+      document.body.appendChild(pRes2);
+
+      // 8) Clone Float32Arrays before sending
+      const ch0 = new Float32Array(mix5_1);
+      const ch1 = new Float32Array(mix5_2);
+
+      // 9) Await ICA
+      const msg = await run2x2Promise(ch0, ch1, samples, fs);
+      const ICs = msg.ICs;       // Float32Array length = 2 * samples
+      const rec5_ICA1 = msg.rec0;    // Float32Array length = samples
+      const dom5 = msg.domFreqs;  // Float32Array length = 2
+
+      // 10) Compute ICA correlation
+      const corr5_ICA = pearsonCorr(mix5_1Arr, Array.from(rec5_ICA1));
+
+      // 11) Overlay mix + PCA + ICA
+      overlaySignals(canvas2, [mix5_1Arr, rec5_PCA1, rec5_ICA1], ['white', 'yellow', 'magenta']);
+
+      // 12) Update legend to include ICA
+      legend2.innerHTML = '';
+      [
+        { color: 'white', label: 'Mix₁' },
+        { color: 'yellow', label: 'PCA(n=1)' },
+        { color: 'magenta', label: 'ICA(n=2)' }
+      ].forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'swatch';
+        sw.style.backgroundColor = item.color;
+        div.appendChild(sw);
+        const txt = document.createElement('span');
+        txt.textContent = item.label;
+        div.appendChild(txt);
+        legend2.appendChild(div);
+      });
+
+      // 13) Display results
+      pRes2.innerHTML = `
+                                    • Demixed freqs: IC₁≈${dom5[0].toFixed(2)} Hz, IC₂≈${dom5[1].toFixed(2)} Hz<br>
+                                    • Corr: PCA(${corr5_PCA.toFixed(2)}), ICA(${corr5_ICA.toFixed(2)})
+                                  `;
+
+      // 14) Plot each recovered IC
+      ['lime', 'orange'].forEach((col, idx) => {
+        const cIC = document.createElement('canvas');
+        cIC.width = 1000;
+        cIC.height = 200;
+        document.body.appendChild(cIC);
+        const icSlice = ICs.subarray(idx * samples, (idx + 1) * samples);
+        drawSignal(cIC, icSlice, col);
+        const pIC = document.createElement('p');
+        pIC.className = 'caption';
+        pIC.textContent = `Recovered IC${idx + 1} (${col})`;
+        document.body.appendChild(pIC);
+      });
+
+      // 15) Explanatory notes
+      const notes2 = [
+        '• In this 5-freq, 2-channel mix, PCA(n=1) (yellow) yields low corr (~0.31).',
+        '• ICA(n=2) (magenta) recovers two mixtures → corr ~0.45; each IC blends several frequencies.'
+      ];
+      notes2.forEach(txt => {
+        const p = document.createElement('p');
+        p.className = 'note';
+        p.textContent = txt;
+        document.body.appendChild(p);
+      });
+
+      // Done with Demo 2
+      return;
+    }
+
+
+    // ──────────────────────────────────────────────────────────
+    // Demo 3: Five frequencies → five channels (returns Promise)
+    // ──────────────────────────────────────────────────────────
+    async function runDemo3() {
+      const duration = 1.0, samples = 1000;
+      const fs = samples / duration;
+
+      // 1) Generate five pure sinusoids
+      const freqs5 = [3, 5, 7, 11, 13];
+      const phases5 = [0, Math.PI / 6, Math.PI / 3, Math.PI / 4, Math.PI / 5];
+      const pure5 = freqs5.map((f, i) => generateSine(f, phases5[i], duration, samples));
+
+      // 2) Mix into five Float32Array channels
+      const A5_5 = [
+        [0.4, 0.2, 0.1, 0.3, 0.5],
+        [0.3, 0.5, 0.2, 0.1, 0.4],
+        [0.1, 0.3, 0.6, 0.2, 0.1],
+        [0.2, 0.1, 0.3, 0.5, 0.4],
+        [0.5, 0.4, 0.1, 0.2, 0.3]
+      ];
+      const mix5_5 = Array.from({ length: 5 }, () => new Float32Array(samples));
+      for (let k = 0; k < samples; k++) {
+        for (let i = 0; i < 5; i++) {
+          let s = 0;
+          for (let j = 0; j < 5; j++) {
+            s += A5_5[i][j] * pure5[j][k];
+          }
+          mix5_5[i][k] = s;
+        }
+      }
+
+      // 3) Heading
+      const heading = document.createElement('h2');
+      heading.textContent = 'Demo 3: Five Frequencies into Five Channels';
+      document.body.appendChild(heading);
+
+      // 4) Canvas for channel₁ original vs placeholder
+      const canvas3 = document.createElement('canvas');
+      canvas3.width = 1000;
+      canvas3.height = 200;
+      document.body.appendChild(canvas3);
+
+      // 5) Legend for mix₁ only
+      const legend3 = document.createElement('div');
+      legend3.className = 'legend';
+      [
+        { color: 'white', label: 'Mix₁' },
+        { color: 'magenta', label: 'ICA rec₁' }
+      ].forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'swatch';
+        sw.style.backgroundColor = item.color;
+        div.appendChild(sw);
+        const txt = document.createElement('span');
+        txt.textContent = item.label;
+        div.appendChild(txt);
+        legend3.appendChild(div);
+      });
+      document.body.appendChild(legend3);
+
+      // 6) Placeholder result text
+      const pRes3 = document.createElement('p');
+      pRes3.className = 'result';
+      pRes3.textContent = 'Computing ICA (5×5)…';
+      document.body.appendChild(pRes3);
+
+      // 7) Initially overlay only mix₁
+      overlaySignals(canvas3, [mix5_5[0]], ['white']);
+
+      // 8) Clone each channel before sending
+      const copies = mix5_5.map(arr => new Float32Array(arr));
+
+      // 9) Await the ICA worker
+      const msg = await runNxNPromise(copies, samples, fs);
+      const ICs = msg.ICs;           // Float32Array length = 5*samples
+      const reconstructed = msg.reconstructed;  // Float32Array length = 5*samples
+      const corrs = msg.corrs;         // Float32Array length = 5
+      const domFreqs = msg.domFreqs;      // Float32Array length = 5
+
+      // 10) Overlay original mix₁ and reconstructed channel₁
+      overlaySignals(
+        canvas3,
+        [
+          mix5_5[0],
+          reconstructed.subarray(0 * samples, 1 * samples)
+        ],
+        ['white', 'magenta']
+      );
+
+      // 11) Update legend
+      legend3.innerHTML = '';
+      [
+        { color: 'white', label: 'Mix₁' },
+        { color: 'magenta', label: 'ICA rec₁' }
+      ].forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'swatch';
+        sw.style.backgroundColor = item.color;
+        div.appendChild(sw);
+        const txt = document.createElement('span');
+        txt.textContent = item.label;
+        div.appendChild(txt);
+        legend3.appendChild(div);
+      });
+
+      // 12) Display channel₁ correlation + IC frequencies
+      pRes3.innerHTML = `
+                                    • Ch₁ corr: ${corrs[0].toFixed(2)}<br>
+                                    • IC freqs: ${Array.from(domFreqs).map(f => f.toFixed(2)).join(' Hz, ')} Hz
+                                  `;
+
+      // 13) Plot each recovered IC
+      const icColors = ['lime', 'orange', 'cyan', 'yellow', 'magenta'];
+      for (let idx = 0; idx < 5; idx++) {
+        const cIC = document.createElement('canvas');
+        cIC.width = 1000;
+        cIC.height = 200;
+        document.body.appendChild(cIC);
+        const icSlice = ICs.subarray(idx * samples, (idx + 1) * samples);
+        drawSignal(cIC, icSlice, icColors[idx]);
+        const pIC = document.createElement('p');
+        pIC.className = 'caption';
+        pIC.textContent = `IC${idx + 1} (${icColors[idx]}) → ~${domFreqs[idx].toFixed(2)} Hz`;
+        document.body.appendChild(pIC);
+      }
+
+      // 14) Explanatory notes
+      const notes3 = [
+        '• In the 5×5 case, ICA(n=5) fully recovers each sinusoid → high correlation on all channels.',
+        '• Each IC is nearly a pure sinusoid at one of the original frequencies.'
+      ];
+      notes3.forEach(txt => {
+        const p = document.createElement('p');
+        p.className = 'note';
+        p.textContent = txt;
+        document.body.appendChild(p);
+      });
+
+      // Done with Demo 3
+      return;
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Run all three demos in sequence
+    // ──────────────────────────────────────────────────────────
+    (async function runAllThreeSequentially() {
+      await runDemo1();
+      await runDemo2();
+      await runDemo3();
+    })();
+  </script>
+
+
 </body>
+
 </html>
