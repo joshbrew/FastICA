@@ -1,5 +1,5 @@
 # FastICA
-2x2 special fast case and n-dimensional general form Fast ICA test with visualized test results. The reconstructed waveform quality can vary, refresh multiple times to see. The demo uses a DFT to estimate teh dominant frequency in the independent components so it is authentically testing for component freqs. For each signal source you need a sensor basically. 
+2x2 special fast case and n-dimensional general form Fast ICA test with visualized test results. The reconstructed waveform quality can vary, refresh multiple times to see. The demo uses a DFT to estimate the dominant frequency in the independent components so it is authentically testing for component freqs. For each signal source you need a sensor basically. 
 
 ### [See the example](https://codepen.io/mootytootyfrooty/pen/yyNggbZ)
 
