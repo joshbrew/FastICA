@@ -818,14 +818,13 @@
       return out;
     }
   </script>
-  -->
+  
   <script>
     // ──────────────────────────────────────────────────────────
     // Helper: wrap a 2×2 ICA worker call in a Promise
     // ──────────────────────────────────────────────────────────
     function run2x2Promise(ch0, ch1, samples, fs) {
       return new Promise((resolve) => {
-        // Create a one‐time listener
         const listener = (evt) => {
           const msg = evt.data;
           if (msg.type === 'result2x2') {
@@ -834,8 +833,7 @@
           }
         };
         icaWorker.addEventListener('message', listener);
-
-        // Post the message (transfer the buffers)
+  
         icaWorker.postMessage(
           {
             type: 'run2x2',
@@ -848,7 +846,7 @@
         );
       });
     }
-
+  
     // ──────────────────────────────────────────────────────────
     // Helper: wrap an n×n ICA worker call in a Promise
     // ──────────────────────────────────────────────────────────
@@ -862,9 +860,8 @@
           }
         };
         icaWorker.addEventListener('message', listener);
-
-        // Extract the buffers to transfer
-        const buffers = channelsArray.map(arr => arr.buffer);
+  
+        const buffers = channelsArray.map((arr) => arr.buffer);
         icaWorker.postMessage(
           {
             type: 'runNxN',
@@ -877,47 +874,54 @@
         );
       });
     }
-
+  
     // ──────────────────────────────────────────────────────────
     // Demo 1: Two sinusoids → two channels (returns Promise)
     // ──────────────────────────────────────────────────────────
     async function runDemo1() {
-      const duration = 1.0, samples = 1000;
+      const duration = 1.0,
+        samples = 1000;
       const fs = samples / duration;
-
+  
+      // 0) Title for Demo 1
+      const title1 = document.createElement('h2');
+      title1.textContent = 'Demo 1: Two Sinusoids into Two Channels';
+      document.body.appendChild(title1);
+  
       // 1) Generate two pure sinusoids
       const pure1 = generateSine(5, 0, duration, samples);
       const pure2 = generateSine(10, Math.PI / 3, duration, samples);
-
+  
       // 2) Mix into two Float32Array channels
-      const mix1 = new Float32Array(samples), mix2 = new Float32Array(samples);
+      const mix1 = new Float32Array(samples),
+        mix2 = new Float32Array(samples);
       for (let i = 0; i < samples; i++) {
         mix1[i] = 0.7 * pure1[i] + 0.3 * pure2[i];
         mix2[i] = 0.3 * pure1[i] + 0.7 * pure2[i];
       }
-
-      // 3) Keep a normal JS‐array copy for PCA/ICA drawing
+  
+      // 3) Keep a normal JS-array copy for PCA/ICA drawing
       const mix1Arr = Array.from(mix1);
       const mix2Arr = Array.from(mix2);
-
+  
       // 4) PCA (synchronous)
       const { recSignal1: recPCA1 } = pcaReconstruct1_sync([mix1Arr, mix2Arr]);
       const corrPCA = pearsonCorr(mix1Arr, recPCA1);
-
+  
       // 5) Draw mix₁ + PCA
       const canvas1 = document.createElement('canvas');
       canvas1.width = 1000;
       canvas1.height = 200;
       document.body.appendChild(canvas1);
       overlaySignals(canvas1, [mix1Arr, recPCA1], ['white', 'yellow']);
-
+  
       // 6) Legend for mix₁ + PCA
       const legend1 = document.createElement('div');
       legend1.className = 'legend';
       [
         { color: 'white', label: 'Mix₁' },
-        { color: 'yellow', label: 'PCA(n=1)' }
-      ].forEach(item => {
+        { color: 'yellow', label: 'PCA(n=1)' },
+      ].forEach((item) => {
         const div = document.createElement('div');
         div.className = 'legend-item';
         const sw = document.createElement('div');
@@ -930,36 +934,36 @@
         legend1.appendChild(div);
       });
       document.body.appendChild(legend1);
-
-      // 7) Placeholder while ICA runs
+  
+      // 7) Placeholder for ICA result
       const pRes1 = document.createElement('p');
       pRes1.className = 'result';
       pRes1.textContent = 'Computing ICA…';
       document.body.appendChild(pRes1);
-
+  
       // 8) Clone Float32Arrays before sending to worker
       const ch0 = new Float32Array(mix1);
       const ch1 = new Float32Array(mix2);
-
-      // 9) Await the ICA worker to finish
+  
+      // 9) Await the ICA worker
       const msg = await run2x2Promise(ch0, ch1, samples, fs);
-      const ICs = msg.ICs;      // Float32Array length = 2 * samples
-      const recICA1 = msg.rec0;     // Float32Array length = samples
-      const domFreqs = msg.domFreqs; // Float32Array length = 2
-
-      // 10) Compute ICA correlation using the non-detached copy
+      const ICs = msg.ICs, // Float32Array length = 2 * samples
+        recICA1 = msg.rec0, // Float32Array length = samples
+        domFreqs = msg.domFreqs; // Float32Array length = 2
+  
+      // 10) Compute ICA correlation
       const corrICA = pearsonCorr(mix1Arr, Array.from(recICA1));
-
+  
       // 11) Overlay mix₁ + PCA + ICA
       overlaySignals(canvas1, [mix1Arr, recPCA1, recICA1], ['white', 'yellow', 'magenta']);
-
+  
       // 12) Update legend to include ICA
       legend1.innerHTML = '';
       [
         { color: 'white', label: 'Mix₁' },
         { color: 'yellow', label: 'PCA(n=1)' },
-        { color: 'magenta', label: 'ICA(n=2)' }
-      ].forEach(item => {
+        { color: 'magenta', label: 'ICA(n=2)' },
+      ].forEach((item) => {
         const div = document.createElement('div');
         div.className = 'legend-item';
         const sw = document.createElement('div');
@@ -971,13 +975,13 @@
         div.appendChild(txt);
         legend1.appendChild(div);
       });
-
+  
       // 13) Show demixed frequencies & correlations
       pRes1.innerHTML = `
-                                    • Demixed freqs: IC₁=${domFreqs[0].toFixed(2)} Hz, IC₂=${domFreqs[1].toFixed(2)} Hz<br>
-                                    • Corr: PCA(${corrPCA.toFixed(2)}), ICA(${corrICA.toFixed(2)})
-                                  `;
-
+        • Demixed freqs: IC₁=${domFreqs[0].toFixed(2)} Hz, IC₂=${domFreqs[1].toFixed(2)} Hz<br>
+        • Corr: PCA(${corrPCA.toFixed(2)}), ICA(${corrICA.toFixed(2)})
+      `;
+  
       // 14) Plot each recovered IC
       ['lime', 'orange'].forEach((col, idx) => {
         const cIC = document.createElement('canvas');
@@ -991,45 +995,51 @@
         pIC.textContent = `Recovered IC${idx + 1} (${col})`;
         document.body.appendChild(pIC);
       });
-
+  
       // 15) Explanatory notes
       const notes1 = [
         '• PCA(n=1) (yellow) captures only one direction → moderate corr (~0.93).',
-        '• ICA(n=2) (magenta) cleanly recovers both 5 Hz & 10 Hz → high corr (~0.99).'
+        '• ICA(n=2) (magenta) cleanly recovers both 5 Hz & 10 Hz → high corr (~0.99).',
       ];
-      notes1.forEach(txt => {
+      notes1.forEach((txt) => {
         const p = document.createElement('p');
         p.className = 'note';
         p.textContent = txt;
         document.body.appendChild(p);
       });
-
+  
       // Done with Demo 1
       return;
     }
-
-
+  
     // ──────────────────────────────────────────────────────────
     // Demo 2: Five frequencies → two channels (returns Promise)
     // ──────────────────────────────────────────────────────────
     async function runDemo2() {
-      const duration = 1.0, samples = 1000;
+      const duration = 1.0,
+        samples = 1000;
       const fs = samples / duration;
-
+  
+      // 0) Title for Demo 2
+      const title2 = document.createElement('h2');
+      title2.textContent = 'Demo 2: Five Frequencies into Two Channels';
+      document.body.appendChild(title2);
+  
       // 1) Generate five pure sinusoids
       const freqs5 = [3, 5, 7, 11, 13];
       const phases5 = [0, Math.PI / 6, Math.PI / 3, Math.PI / 4, Math.PI / 5];
       const pure5 = freqs5.map((f, i) => generateSine(f, phases5[i], duration, samples));
-
+  
       // 2) Mix into two Float32Array channels
       const A5_2 = [
         [0.5, 0.3, 0.1, 0.4, 0.2],
-        [0.2, 0.6, 0.4, 0.1, 0.3]
+        [0.2, 0.6, 0.4, 0.1, 0.3],
       ];
-      const mix5_1 = new Float32Array(samples);
-      const mix5_2 = new Float32Array(samples);
+      const mix5_1 = new Float32Array(samples),
+        mix5_2 = new Float32Array(samples);
       for (let k = 0; k < samples; k++) {
-        let s1 = 0, s2 = 0;
+        let s1 = 0,
+          s2 = 0;
         for (let i = 0; i < 5; i++) {
           s1 += A5_2[0][i] * pure5[i][k];
           s2 += A5_2[1][i] * pure5[i][k];
@@ -1037,29 +1047,29 @@
         mix5_1[k] = s1;
         mix5_2[k] = s2;
       }
-
-      // 3) Keep normal JS‐array copies
+  
+      // 3) Keep normal JS-array copies
       const mix5_1Arr = Array.from(mix5_1);
       const mix5_2Arr = Array.from(mix5_2);
-
+  
       // 4) PCA (synchronous)
       const { recSignal1: rec5_PCA1 } = pcaReconstruct1_sync([mix5_1Arr, mix5_2Arr]);
       const corr5_PCA = pearsonCorr(mix5_1Arr, rec5_PCA1);
-
+  
       // 5) Draw mix₅₁ + PCA
       const canvas2 = document.createElement('canvas');
       canvas2.width = 1000;
       canvas2.height = 200;
       document.body.appendChild(canvas2);
       overlaySignals(canvas2, [mix5_1Arr, rec5_PCA1], ['white', 'yellow']);
-
+  
       // 6) Legend for mix₅₁ + PCA
       const legend2 = document.createElement('div');
       legend2.className = 'legend';
       [
         { color: 'white', label: 'Mix₁' },
-        { color: 'yellow', label: 'PCA(n=1)' }
-      ].forEach(item => {
+        { color: 'yellow', label: 'PCA(n=1)' },
+      ].forEach((item) => {
         const div = document.createElement('div');
         div.className = 'legend-item';
         const sw = document.createElement('div');
@@ -1072,36 +1082,36 @@
         legend2.appendChild(div);
       });
       document.body.appendChild(legend2);
-
+  
       // 7) Placeholder for ICA result
       const pRes2 = document.createElement('p');
       pRes2.className = 'result';
       pRes2.textContent = 'Computing ICA…';
       document.body.appendChild(pRes2);
-
+  
       // 8) Clone Float32Arrays before sending
       const ch0 = new Float32Array(mix5_1);
       const ch1 = new Float32Array(mix5_2);
-
+  
       // 9) Await ICA
       const msg = await run2x2Promise(ch0, ch1, samples, fs);
-      const ICs = msg.ICs;       // Float32Array length = 2 * samples
-      const rec5_ICA1 = msg.rec0;    // Float32Array length = samples
-      const dom5 = msg.domFreqs;  // Float32Array length = 2
-
+      const ICs = msg.ICs, // Float32Array length = 2 * samples
+        rec5_ICA1 = msg.rec0, // Float32Array length = samples
+        dom5 = msg.domFreqs; // Float32Array length = 2
+  
       // 10) Compute ICA correlation
       const corr5_ICA = pearsonCorr(mix5_1Arr, Array.from(rec5_ICA1));
-
+  
       // 11) Overlay mix + PCA + ICA
       overlaySignals(canvas2, [mix5_1Arr, rec5_PCA1, rec5_ICA1], ['white', 'yellow', 'magenta']);
-
+  
       // 12) Update legend to include ICA
       legend2.innerHTML = '';
       [
         { color: 'white', label: 'Mix₁' },
         { color: 'yellow', label: 'PCA(n=1)' },
-        { color: 'magenta', label: 'ICA(n=2)' }
-      ].forEach(item => {
+        { color: 'magenta', label: 'ICA(n=2)' },
+      ].forEach((item) => {
         const div = document.createElement('div');
         div.className = 'legend-item';
         const sw = document.createElement('div');
@@ -1113,13 +1123,13 @@
         div.appendChild(txt);
         legend2.appendChild(div);
       });
-
+  
       // 13) Display results
       pRes2.innerHTML = `
-                                    • Demixed freqs: IC₁≈${dom5[0].toFixed(2)} Hz, IC₂≈${dom5[1].toFixed(2)} Hz<br>
-                                    • Corr: PCA(${corr5_PCA.toFixed(2)}), ICA(${corr5_ICA.toFixed(2)})
-                                  `;
-
+        • Demixed freqs: IC₁≈${dom5[0].toFixed(2)} Hz, IC₂≈${dom5[1].toFixed(2)} Hz<br>
+        • Corr: PCA(${corr5_PCA.toFixed(2)}), ICA(${corr5_ICA.toFixed(2)})
+      `;
+  
       // 14) Plot each recovered IC
       ['lime', 'orange'].forEach((col, idx) => {
         const cIC = document.createElement('canvas');
@@ -1133,43 +1143,48 @@
         pIC.textContent = `Recovered IC${idx + 1} (${col})`;
         document.body.appendChild(pIC);
       });
-
+  
       // 15) Explanatory notes
       const notes2 = [
         '• In this 5-freq, 2-channel mix, PCA(n=1) (yellow) yields low corr (~0.31).',
-        '• ICA(n=2) (magenta) recovers two mixtures → corr ~0.45; each IC blends several frequencies.'
+        '• ICA(n=2) (magenta) recovers two mixtures → corr ~0.45; each IC blends several frequencies.',
       ];
-      notes2.forEach(txt => {
+      notes2.forEach((txt) => {
         const p = document.createElement('p');
         p.className = 'note';
         p.textContent = txt;
         document.body.appendChild(p);
       });
-
+  
       // Done with Demo 2
       return;
     }
-
-
+  
     // ──────────────────────────────────────────────────────────
     // Demo 3: Five frequencies → five channels (returns Promise)
     // ──────────────────────────────────────────────────────────
     async function runDemo3() {
-      const duration = 1.0, samples = 1000;
+      const duration = 1.0,
+        samples = 1000;
       const fs = samples / duration;
-
+  
+      // 0) Title for Demo 3
+      const title3 = document.createElement('h2');
+      title3.textContent = 'Demo 3: Five Frequencies into Five Channels';
+      document.body.appendChild(title3);
+  
       // 1) Generate five pure sinusoids
       const freqs5 = [3, 5, 7, 11, 13];
       const phases5 = [0, Math.PI / 6, Math.PI / 3, Math.PI / 4, Math.PI / 5];
       const pure5 = freqs5.map((f, i) => generateSine(f, phases5[i], duration, samples));
-
+  
       // 2) Mix into five Float32Array channels
       const A5_5 = [
         [0.4, 0.2, 0.1, 0.3, 0.5],
         [0.3, 0.5, 0.2, 0.1, 0.4],
         [0.1, 0.3, 0.6, 0.2, 0.1],
         [0.2, 0.1, 0.3, 0.5, 0.4],
-        [0.5, 0.4, 0.1, 0.2, 0.3]
+        [0.5, 0.4, 0.1, 0.2, 0.3],
       ];
       const mix5_5 = Array.from({ length: 5 }, () => new Float32Array(samples));
       for (let k = 0; k < samples; k++) {
@@ -1181,25 +1196,20 @@
           mix5_5[i][k] = s;
         }
       }
-
-      // 3) Heading
-      const heading = document.createElement('h2');
-      heading.textContent = 'Demo 3: Five Frequencies into Five Channels';
-      document.body.appendChild(heading);
-
-      // 4) Canvas for channel₁ original vs placeholder
+  
+      // 3) Canvas for channel₁ original vs placeholder
       const canvas3 = document.createElement('canvas');
       canvas3.width = 1000;
       canvas3.height = 200;
       document.body.appendChild(canvas3);
-
-      // 5) Legend for mix₁ only
+  
+      // 4) Legend for mix₁ only
       const legend3 = document.createElement('div');
       legend3.className = 'legend';
       [
         { color: 'white', label: 'Mix₁' },
-        { color: 'magenta', label: 'ICA rec₁' }
-      ].forEach(item => {
+        { color: 'magenta', label: 'ICA rec₁' },
+      ].forEach((item) => {
         const div = document.createElement('div');
         div.className = 'legend-item';
         const sw = document.createElement('div');
@@ -1212,42 +1222,39 @@
         legend3.appendChild(div);
       });
       document.body.appendChild(legend3);
-
-      // 6) Placeholder result text
+  
+      // 5) Placeholder result text
       const pRes3 = document.createElement('p');
       pRes3.className = 'result';
       pRes3.textContent = 'Computing ICA (5×5)…';
       document.body.appendChild(pRes3);
-
-      // 7) Initially overlay only mix₁
+  
+      // 6) Initially overlay only mix₁
       overlaySignals(canvas3, [mix5_5[0]], ['white']);
-
-      // 8) Clone each channel before sending
-      const copies = mix5_5.map(arr => new Float32Array(arr));
-
-      // 9) Await the ICA worker
+  
+      // 7) Clone each channel before sending
+      const copies = mix5_5.map((arr) => new Float32Array(arr));
+  
+      // 8) Await the ICA worker
       const msg = await runNxNPromise(copies, samples, fs);
-      const ICs = msg.ICs;           // Float32Array length = 5*samples
-      const reconstructed = msg.reconstructed;  // Float32Array length = 5*samples
-      const corrs = msg.corrs;         // Float32Array length = 5
-      const domFreqs = msg.domFreqs;      // Float32Array length = 5
-
-      // 10) Overlay original mix₁ and reconstructed channel₁
+      const ICs = msg.ICs, // Float32Array length = 5 * samples
+        reconstructed = msg.reconstructed, // Float32Array length = 5 * samples
+        corrs = msg.corrs, // Float32Array length = 5
+        domFreqs = msg.domFreqs; // Float32Array length = 5
+  
+      // 9) Overlay original mix₁ and reconstructed channel₁
       overlaySignals(
         canvas3,
-        [
-          mix5_5[0],
-          reconstructed.subarray(0 * samples, 1 * samples)
-        ],
+        [mix5_5[0], reconstructed.subarray(0 * samples, 1 * samples)],
         ['white', 'magenta']
       );
-
-      // 11) Update legend
+  
+      // 10) Update legend
       legend3.innerHTML = '';
       [
         { color: 'white', label: 'Mix₁' },
-        { color: 'magenta', label: 'ICA rec₁' }
-      ].forEach(item => {
+        { color: 'magenta', label: 'ICA rec₁' },
+      ].forEach((item) => {
         const div = document.createElement('div');
         div.className = 'legend-item';
         const sw = document.createElement('div');
@@ -1259,14 +1266,14 @@
         div.appendChild(txt);
         legend3.appendChild(div);
       });
-
-      // 12) Display channel₁ correlation + IC frequencies
+  
+      // 11) Display channel₁ correlation + IC frequencies
       pRes3.innerHTML = `
-                                    • Ch₁ corr: ${corrs[0].toFixed(2)}<br>
-                                    • IC freqs: ${Array.from(domFreqs).map(f => f.toFixed(2)).join(' Hz, ')} Hz
-                                  `;
-
-      // 13) Plot each recovered IC
+        • Ch₁ corr: ${corrs[0].toFixed(2)}<br>
+        • IC freqs: ${Array.from(domFreqs).map((f) => f.toFixed(2)).join(' Hz, ')} Hz
+      `;
+  
+      // 12) Plot each recovered IC
       const icColors = ['lime', 'orange', 'cyan', 'yellow', 'magenta'];
       for (let idx = 0; idx < 5; idx++) {
         const cIC = document.createElement('canvas');
@@ -1280,25 +1287,25 @@
         pIC.textContent = `IC${idx + 1} (${icColors[idx]}) → ~${domFreqs[idx].toFixed(2)} Hz`;
         document.body.appendChild(pIC);
       }
-
-      // 14) Explanatory notes
+  
+      // 13) Explanatory notes
       const notes3 = [
         '• In the 5×5 case, ICA(n=5) fully recovers each sinusoid → high correlation on all channels.',
-        '• Each IC is nearly a pure sinusoid at one of the original frequencies.'
+        '• Each IC is nearly a pure sinusoid at one of the original frequencies.',
       ];
-      notes3.forEach(txt => {
+      notes3.forEach((txt) => {
         const p = document.createElement('p');
         p.className = 'note';
         p.textContent = txt;
         document.body.appendChild(p);
       });
-
+  
       // Done with Demo 3
       return;
     }
-
+  
     // ──────────────────────────────────────────────────────────
-    // Run all three demos in sequence
+    // Run all three demos in sequence, each with its title
     // ──────────────────────────────────────────────────────────
     (async function runAllThreeSequentially() {
       await runDemo1();
@@ -1306,7 +1313,7 @@
       await runDemo3();
     })();
   </script>
-
+  
 
 </body>
 
